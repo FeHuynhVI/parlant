@@ -131,6 +131,7 @@ class LiteLLMSchematicGenerator(SchematicGenerator[T]):
             model=self.model_name,
             max_tokens=5000,
             response_format={"type": "json_object"},
+            track_cost=False,
             **litellm_api_arguments,
         )
 
