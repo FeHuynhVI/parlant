@@ -186,7 +186,7 @@ class PromptBuilder:
                 "event_kind": e.kind.value,
                 "event_source": source_map[e.source],
                 "data": data,
-            }
+            }, ensure_ascii=False
         )
 
     def add_agent_identity(
