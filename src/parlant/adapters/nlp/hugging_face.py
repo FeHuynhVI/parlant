@@ -158,9 +158,19 @@ class HuggingFaceEmbedder(Embedder):
 
 class JinaAIEmbedder(HuggingFaceEmbedder):
     def __init__(self) -> None:
-        super().__init__("AITeamVN/Vietnamese_Embedding_v2")
+        super().__init__("jinaai/jina-embeddings-v2-base-en")
 
     @property
     @override
     def dimensions(self) -> int:
         return 768
+
+
+class AITeamVNAIEmbedder(HuggingFaceEmbedder):
+    def __init__(self) -> None:
+        super().__init__("AITeamVN/Vietnamese_Embedding_v2")
+
+    @property
+    @override
+    def dimensions(self) -> int:
+        return 1024

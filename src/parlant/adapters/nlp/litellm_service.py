@@ -48,8 +48,8 @@ litellm.register_model({
 
 
 from parlant.adapters.nlp.common import normalize_json_output
-from parlant.adapters.nlp.hugging_face import JinaAIEmbedder
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.adapters.nlp.hugging_face import JinaAIEmbedder, AITeamVNAIEmbedder
 from parlant.core.loggers import Logger
 from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.nlp.service import NLPService
@@ -255,7 +255,8 @@ Please set LITELLM_PROVIDER_API_KEY in your environment before running Parlant.
 
     @override
     async def get_embedder(self) -> Embedder:
-        return JinaAIEmbedder()
+        # return JinaAIEmbedder()
+        return AITeamVNAIEmbedder()
 
     @override
     async def get_moderation_service(self) -> ModerationService:
