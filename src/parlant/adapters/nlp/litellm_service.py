@@ -25,6 +25,15 @@ import tiktoken
 
 import litellm
 
+litellm.model_cost_map["gemma-3-27b-it"] = {
+    "input_cost_per_token": 2898.72,
+    "output_cost_per_token": 4348.08,
+    "max_context": 8192
+}
+
+litellm.model_cost_map["litellm_proxy/gemma-3-27b-it"] = litellm.model_cost_map["gemma-3-27b-it"]
+
+
 from parlant.adapters.nlp.common import normalize_json_output
 from parlant.adapters.nlp.hugging_face import JinaAIEmbedder
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
