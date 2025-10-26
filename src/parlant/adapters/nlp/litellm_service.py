@@ -24,14 +24,27 @@ from pydantic import ValidationError
 import tiktoken
 
 import litellm
+from litellm import register_model
 
-litellm.model_cost_map["gemma-3-27b-it"] = {
-    "input_cost_per_token": 2898.72,
-    "output_cost_per_token": 4348.08,
-    "max_context": 8192
-}
+litellm.register_model({
+        "gemma-3-27b-it": {
+        "max_tokens": 8192, 
+        "input_cost_per_token": 2898.72, 
+        "output_cost_per_token": 4348.08, 
+        "litellm_provider": "fci", 
+        "mode": "chat"
+    },
+})
 
-litellm.model_cost_map["litellm_proxy/gemma-3-27b-it"] = litellm.model_cost_map["gemma-3-27b-it"]
+litellm.register_model({
+        "litellm_proxy/gemma-3-27b-it": {
+        "max_tokens": 8192, 
+        "input_cost_per_token": 2898.72, 
+        "output_cost_per_token": 4348.08, 
+        "litellm_provider": "fci", 
+        "mode": "chat"
+    },
+})
 
 
 from parlant.adapters.nlp.common import normalize_json_output
