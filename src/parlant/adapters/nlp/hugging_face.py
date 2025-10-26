@@ -83,6 +83,7 @@ def _create_auto_model(model_name: str) -> AutoModel:
     model = AutoModel.from_pretrained(
         pretrained_model_name_or_path=model_name,
         attn_implementation="eager",
+        trust_remote_code=True
     ).to(_get_device())
 
     model.save_pretrained(save_dir)
