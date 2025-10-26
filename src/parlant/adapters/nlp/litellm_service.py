@@ -31,7 +31,7 @@ litellm.register_model({
         "max_tokens": 8192, 
         "input_cost_per_token": 2898.72, 
         "output_cost_per_token": 4348.08, 
-        "litellm_provider": "fci", 
+        "litellm_provider": "litellm_proxy", 
         "mode": "chat"
     },
 })
@@ -41,7 +41,7 @@ litellm.register_model({
         "max_tokens": 8192, 
         "input_cost_per_token": 2898.72, 
         "output_cost_per_token": 4348.08, 
-        "litellm_provider": "fci", 
+        "litellm_provider": "litellm_proxy", 
         "mode": "chat"
     },
 })
