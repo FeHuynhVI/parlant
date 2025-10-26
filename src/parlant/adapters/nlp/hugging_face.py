@@ -158,7 +158,7 @@ class HuggingFaceEmbedder(Embedder):
 
 class JinaAIEmbedder(HuggingFaceEmbedder):
     def __init__(self) -> None:
-        super().__init__("jinaai/jina-embeddings-v4")
+        super().__init__("AITeamVN/Vietnamese_Embedding_v2")
 
     @property
     @override
