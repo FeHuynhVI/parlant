@@ -237,7 +237,6 @@ class SessionCreationParamsDTO(
     agent_id: SessionAgentIdPath
     customer_id: SessionCreationParamsCustomerIdField = None
     title: SessionTitleField | None = None
-    workspace_id: str | None = None
     metadata: SessionMetadataField | None = None
 
 
@@ -1338,7 +1337,6 @@ def create_router(
             title=params.title,
             allow_greeting=allow_greeting,
             metadata=params.metadata or {},
-            workspace_id=params.workspace_id,
         )
 
         return SessionDTO(

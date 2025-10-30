@@ -100,7 +100,6 @@ class SessionModule:
         agent_id: AgentId,
         title: str | None = None,
         allow_greeting: bool = False,
-        workspace_id: str| None = None,
         metadata: Mapping[str, JSONSerializable] | None = None,
     ) -> Session:
         _ = await self._agent_store.read_agent(agent_id=agent_id)
@@ -111,7 +110,6 @@ class SessionModule:
             agent_id=agent_id,
             title=title,
             metadata=metadata or {},
-            workspace_id=workspace_id
         )
 
         if allow_greeting:

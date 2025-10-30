@@ -269,7 +269,6 @@ class Session:
     agent_id: AgentId
     mode: SessionMode
     title: Optional[str]
-    workspace_id: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
     agent_states: Sequence[AgentState]
     metadata: Mapping[str, JSONSerializable]
@@ -293,7 +292,6 @@ class SessionStore(ABC):
         agent_id: AgentId,
         creation_utc: Optional[datetime] = None,
         title: Optional[str] = None,
-        workspace_id: Optional[str] = None,
         mode: Optional[SessionMode] = None,
         metadata: Mapping[str, JSONSerializable] = {},
     ) -> Session: ...
@@ -430,7 +428,6 @@ class _SessionDocument(TypedDict, total=False):
     agent_id: AgentId
     mode: SessionMode
     title: Optional[str]
-    workspace_id: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
     agent_states: Sequence[_AgentStateDocument]
     metadata: Mapping[str, JSONSerializable]
@@ -852,7 +849,6 @@ class SessionDocumentStore(SessionStore):
             agent_id=session.agent_id,
             mode=session.mode,
             title=session.title if session.title else None,
-            workspace_id=session.workspace_id if session.workspace_id else None,
             consumption_offsets=session.consumption_offsets,
             agent_states=[
                 _AgentStateDocument(
@@ -876,7 +872,6 @@ class SessionDocumentStore(SessionStore):
             agent_id=session_document["agent_id"],
             mode=session_document["mode"],
             title=session_document["title"],
-            workspace_id=session_document["workspace_id"],
             consumption_offsets=session_document["consumption_offsets"],
             agent_states=[
                 AgentState(
@@ -930,7 +925,6 @@ class SessionDocumentStore(SessionStore):
         creation_utc: Optional[datetime] = None,
         title: Optional[str] = None,
         mode: Optional[SessionMode] = None,
-        workspace_id: Optional[str] = None,
         metadata: Mapping[str, JSONSerializable] = {},
     ) -> Session:
         async with self._lock.writer_lock:
@@ -948,7 +942,6 @@ class SessionDocumentStore(SessionStore):
                 title=title,
                 agent_states=[],
                 metadata=metadata,
-                workspace_id=workspace_id
             )
 
             await self._session_collection.insert_one(document=self._serialize_session(session))
