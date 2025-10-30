@@ -43,7 +43,7 @@ from parlant.core.context_variables import ContextVariableId
 from parlant.core.customers import CustomerId
 from parlant.core.guidelines import GuidelineId
 from parlant.core.journeys import JourneyId
-from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
+from parlant.core.nlp.generation_info import GenerationInfo
 from parlant.core.persistence.common import (
     ObjectId,
     Where,
@@ -112,7 +112,7 @@ class Event:
     kind: EventKind
     creation_utc: datetime
     offset: int
-    correlation_id: str
+    trace_id: str
     data: JSONSerializable
     deleted: bool
 
@@ -256,7 +256,7 @@ LifeSpan: TypeAlias = Literal["response", "session"]
 
 @dataclass(frozen=True)
 class AgentState:
-    correlation_id: str
+    trace_id: str
     applied_guideline_ids: Sequence[GuidelineId]
     journey_paths: Mapping[JourneyId, Sequence[Optional[GuidelineId]]]
 
@@ -272,6 +272,7 @@ class Session:
     workspace_id: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
     agent_states: Sequence[AgentState]
+    metadata: Mapping[str, JSONSerializable]
 
 
 class SessionUpdateParams(TypedDict, total=False):
@@ -281,6 +282,7 @@ class SessionUpdateParams(TypedDict, total=False):
     title: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
     agent_states: Sequence[AgentState]
+    metadata: Mapping[str, JSONSerializable]
 
 
 class SessionStore(ABC):
@@ -292,6 +294,8 @@ class SessionStore(ABC):
         creation_utc: Optional[datetime] = None,
         title: Optional[str] = None,
         workspace_id: Optional[str] = None,
+        mode: Optional[SessionMode] = None,
+        metadata: Mapping[str, JSONSerializable] = {},
     ) -> Session: ...
 
     @abstractmethod
@@ -321,12 +325,27 @@ class SessionStore(ABC):
     ) -> Sequence[Session]: ...
 
     @abstractmethod
+    async def set_metadata(
+        self,
+        session_id: SessionId,
+        key: str,
+        value: JSONSerializable,
+    ) -> Session: ...
+
+    @abstractmethod
+    async def unset_metadata(
+        self,
+        session_id: SessionId,
+        key: str,
+    ) -> Session: ...
+
+    @abstractmethod
     async def create_event(
         self,
         session_id: SessionId,
         source: EventSource,
         kind: EventKind,
-        correlation_id: str,
+        trace_id: str,
         data: JSONSerializable,
         creation_utc: Optional[datetime] = None,
     ) -> Event: ...
@@ -349,27 +368,11 @@ class SessionStore(ABC):
         self,
         session_id: SessionId,
         source: Optional[EventSource] = None,
-        correlation_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
         kinds: Sequence[EventKind] = [],
         min_offset: Optional[int] = None,
         exclude_deleted: bool = True,
     ) -> Sequence[Event]: ...
-
-    @abstractmethod
-    async def create_inspection(
-        self,
-        session_id: SessionId,
-        correlation_id: str,
-        message_generations: Sequence[MessageGenerationInspection],
-        preparation_iterations: Sequence[PreparationIteration],
-    ) -> Inspection: ...
-
-    @abstractmethod
-    async def read_inspection(
-        self,
-        session_id: SessionId,
-        correlation_id: str,
-    ) -> Inspection: ...
 
 
 class _SessionDocument_v0_4_0(TypedDict, total=False):
@@ -383,8 +386,14 @@ class _SessionDocument_v0_4_0(TypedDict, total=False):
     consumption_offsets: Mapping[ConsumerId, int]
 
 
-class _AgentStateDocument(TypedDict):
+class _AgentStateDocument_v0_6_0(TypedDict):
     correlation_id: str
+    applied_guideline_ids: Sequence[GuidelineId]
+    journey_paths: Mapping[JourneyId, Sequence[Optional[GuidelineId]]]
+
+
+class _AgentStateDocument(TypedDict):
+    trace_id: str
     applied_guideline_ids: Sequence[GuidelineId]
     journey_paths: Mapping[JourneyId, Sequence[Optional[GuidelineId]]]
 
@@ -398,7 +407,19 @@ class _SessionDocument_v0_5_0(TypedDict, total=False):
     mode: SessionMode
     title: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
-    agent_state: _AgentStateDocument
+    agent_state: _AgentStateDocument_v0_6_0
+
+
+class _SessionDocument_v0_6_0(TypedDict, total=False):
+    id: ObjectId
+    version: Version.String
+    creation_utc: str
+    customer_id: CustomerId
+    agent_id: AgentId
+    mode: SessionMode
+    title: Optional[str]
+    consumption_offsets: Mapping[ConsumerId, int]
+    agent_states: Sequence[_AgentStateDocument_v0_6_0]
 
 
 class _SessionDocument(TypedDict, total=False):
@@ -412,6 +433,20 @@ class _SessionDocument(TypedDict, total=False):
     workspace_id: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
     agent_states: Sequence[_AgentStateDocument]
+    metadata: Mapping[str, JSONSerializable]
+
+
+class _EventDocument_v0_6_0(TypedDict, total=False):
+    id: ObjectId
+    version: Version.String
+    creation_utc: str
+    session_id: SessionId
+    source: str
+    kind: str
+    offset: int
+    correlation_id: str
+    data: JSONSerializable
+    deleted: bool
 
 
 class _EventDocument(TypedDict, total=False):
@@ -422,7 +457,7 @@ class _EventDocument(TypedDict, total=False):
     source: str
     kind: str
     offset: int
-    correlation_id: str
+    trace_id: str
     data: JSONSerializable
     deleted: bool
 
@@ -494,7 +529,7 @@ class _InspectionDocument_v0_1_0(TypedDict, total=False):
     id: ObjectId
     version: Version.String
     session_id: SessionId
-    correlation_id: str
+    trace_id: str
     message_generations: Sequence[_MessageGenerationInspectionDocument_v0_1_0]
     preparation_iterations: Sequence[_PreparationIterationDocument_v0_1_0]
 
@@ -503,7 +538,7 @@ class _InspectionDocument_v0_2_0(TypedDict, total=False):
     id: ObjectId
     version: Version.String
     session_id: SessionId
-    correlation_id: str
+    trace_id: str
     message_generations: Sequence[_MessageGenerationInspectionDocument_v0_2_0]
     preparation_iterations: Sequence[_PreparationIterationDocument_v0_2_0]
 
@@ -512,7 +547,7 @@ class _InspectionDocument_v0_3_0(TypedDict, total=False):
     id: ObjectId
     version: Version.String
     session_id: SessionId
-    correlation_id: str
+    trace_id: str
     message_generations: Sequence[_MessageGenerationInspectionDocument_v0_2_0]
     preparation_iterations: Sequence[_PreparationIterationDocument]
 
@@ -521,7 +556,7 @@ class _InspectionDocument(TypedDict, total=False):
     id: ObjectId
     version: Version.String
     session_id: SessionId
-    correlation_id: str
+    trace_id: str
     message_generations: Sequence[_MessageGenerationInspectionDocument]
     preparation_iterations: Sequence[_PreparationIterationDocument]
 
@@ -554,13 +589,12 @@ class _ToolEventData_v0_5_0(TypedDict):
 
 
 class SessionDocumentStore(SessionStore):
-    VERSION = Version.from_string("0.6.0")
+    VERSION = Version.from_string("0.7.0")
 
     def __init__(self, database: DocumentDatabase, allow_migration: bool = False):
         self._database = database
         self._session_collection: DocumentCollection[_SessionDocument]
         self._event_collection: DocumentCollection[_EventDocument]
-        self._inspection_collection: DocumentCollection[_InspectionDocument]
         self._allow_migration = allow_migration
 
         self._lock = ReaderWriterLock()
@@ -592,7 +626,7 @@ class SessionDocumentStore(SessionStore):
                 mode=doc["mode"],
                 title=doc["title"],
                 consumption_offsets=doc["consumption_offsets"],
-                agent_state=_AgentStateDocument(
+                agent_state=_AgentStateDocument_v0_6_0(
                     applied_guideline_ids=[],
                     journey_paths={},
                     correlation_id="N/A",
@@ -614,6 +648,29 @@ class SessionDocumentStore(SessionStore):
                 agent_states=[],
             )
 
+        async def v0_6_0_to_v0_7_0(doc: BaseDocument) -> Optional[BaseDocument]:
+            doc = cast(_SessionDocument_v0_6_0, doc)
+
+            return _SessionDocument(
+                id=doc["id"],
+                version=Version.String("0.7.0"),
+                creation_utc=doc["creation_utc"],
+                customer_id=doc["customer_id"],
+                agent_id=doc["agent_id"],
+                mode=doc["mode"],
+                title=doc["title"],
+                consumption_offsets=doc["consumption_offsets"],
+                agent_states=[
+                    _AgentStateDocument(
+                        trace_id=s["correlation_id"],
+                        applied_guideline_ids=s["applied_guideline_ids"],
+                        journey_paths=s["journey_paths"],
+                    )
+                    for s in doc.get("agent_states", [])
+                ],
+                metadata={},
+            )
+
         return await DocumentMigrationHelper[_SessionDocument](
             self,
             {
@@ -622,14 +679,15 @@ class SessionDocumentStore(SessionStore):
                 "0.3.0": v0_1_0_to_v0_4_0,
                 "0.4.0": v0_4_0_to_v0_5_0,
                 "0.5.0": v0_5_0_to_v0_6_0,
+                "0.6.0": v0_6_0_to_v0_7_0,
             },
         ).migrate(doc)
 
     async def _event_document_loader(self, doc: BaseDocument) -> Optional[_EventDocument]:
         async def v0_1_0_to_v0_5_0(doc: BaseDocument) -> Optional[BaseDocument]:
-            doc = cast(_EventDocument, doc)
+            doc = cast(_EventDocument_v0_6_0, doc)
 
-            return _EventDocument(
+            return _EventDocument_v0_6_0(
                 id=doc["id"],
                 version=Version.String("0.5.0"),
                 creation_utc=doc["creation_utc"],
@@ -643,7 +701,7 @@ class SessionDocumentStore(SessionStore):
             )
 
         async def v0_5_0_to_v0_6_0(doc: BaseDocument) -> Optional[BaseDocument]:
-            doc = cast(_EventDocument, doc)
+            doc = cast(_EventDocument_v0_6_0, doc)
 
             if doc["kind"] == "message":
                 doc_data = cast(_MessageEventData_v0_5_0, doc["data"])
@@ -685,7 +743,7 @@ class SessionDocumentStore(SessionStore):
             else:
                 data = doc["data"]
 
-            return _EventDocument(
+            return _EventDocument_v0_6_0(
                 id=doc["id"],
                 version=Version.String("0.6.0"),
                 creation_utc=doc["creation_utc"],
@@ -698,6 +756,24 @@ class SessionDocumentStore(SessionStore):
                 deleted=doc["deleted"],
             )
 
+        async def v0_6_0_to_v0_7_0(doc: BaseDocument) -> Optional[BaseDocument]:
+            doc = cast(_EventDocument_v0_6_0, doc)
+
+            data = doc["data"]
+
+            return _EventDocument(
+                id=doc["id"],
+                version=Version.String("0.7.0"),
+                creation_utc=doc["creation_utc"],
+                session_id=doc["session_id"],
+                source=doc["source"],
+                kind=doc["kind"],
+                offset=doc["offset"],
+                trace_id=doc["correlation_id"],
+                data=data,
+                deleted=doc["deleted"],
+            )
+
         return await DocumentMigrationHelper[_EventDocument](
             self,
             {
@@ -706,125 +782,7 @@ class SessionDocumentStore(SessionStore):
                 "0.3.0": v0_1_0_to_v0_5_0,
                 "0.4.0": v0_1_0_to_v0_5_0,
                 "0.5.0": v0_5_0_to_v0_6_0,
-            },
-        ).migrate(doc)
-
-    async def _inspection_document_loader(self, doc: BaseDocument) -> Optional[_InspectionDocument]:
-        async def v0_1_0_to_v0_2_0(doc: BaseDocument) -> Optional[BaseDocument]:
-            doc = cast(_InspectionDocument_v0_1_0, doc)
-
-            return _InspectionDocument_v0_2_0(
-                id=doc["id"],
-                version=Version.String("0.2.0"),
-                session_id=doc["session_id"],
-                correlation_id=doc["correlation_id"],
-                message_generations=[
-                    _MessageGenerationInspectionDocument_v0_2_0(
-                        generation=mg["generation"],
-                        messages=[
-                            m if isinstance(m, str) else m["message"] if m else None
-                            for m in mg["messages"]
-                        ],
-                    )
-                    for mg in doc["message_generations"]
-                ],
-                preparation_iterations=doc["preparation_iterations"],
-            )
-
-        async def v0_2_0_to_v0_3_0(doc: BaseDocument) -> Optional[BaseDocument]:
-            doc = cast(_InspectionDocument_v0_2_0, doc)
-            return _InspectionDocument_v0_3_0(
-                id=doc["id"],
-                version=Version.String("0.3.0"),
-                session_id=doc["session_id"],
-                correlation_id=doc["correlation_id"],
-                message_generations=[
-                    _MessageGenerationInspectionDocument_v0_2_0(
-                        generation=mg["generation"],
-                        messages=[
-                            m if isinstance(m, str) else m["message"] if m else None
-                            for m in mg["messages"]
-                        ],
-                    )
-                    for mg in doc["message_generations"]
-                ],
-                preparation_iterations=[
-                    _PreparationIterationDocument(
-                        guideline_matches=i["guideline_propositions"],
-                        tool_calls=i["tool_calls"],
-                        terms=i["terms"],
-                        context_variables=i["context_variables"],
-                        generations=_PreparationIterationGenerationsDocument(
-                            guideline_match=_GuidelineMatchInspectionDocument(
-                                total_duration=i["generations"]["guideline_proposition"][
-                                    "total_duration"
-                                ],
-                                batches=[
-                                    _GenerationInfoDocument(
-                                        schema_name=g["schema_name"],
-                                        model=g["model"],
-                                        duration=g["duration"],
-                                        usage=_UsageInfoDocument(
-                                            input_tokens=g["usage"]["input_tokens"],
-                                            output_tokens=g["usage"]["output_tokens"],
-                                            extra={
-                                                k: v if v else 0
-                                                for k, v in g["usage"]["extra"].items()  # type: ignore  # fix bug where values were None
-                                            },
-                                        ),
-                                    )
-                                    for g in i["generations"]["guideline_proposition"]["batches"]
-                                ],
-                            ),
-                            tool_calls=i["generations"]["tool_calls"],
-                        ),
-                    )
-                    for i in doc["preparation_iterations"]
-                ],
-            )
-
-        async def v0_3_0_to_v0_4_0(doc: BaseDocument) -> Optional[BaseDocument]:
-            doc = cast(_InspectionDocument_v0_3_0, doc)
-
-            return _InspectionDocument(
-                id=doc["id"],
-                version=Version.String("0.4.0"),
-                session_id=doc["session_id"],
-                correlation_id=doc["correlation_id"],
-                message_generations=[
-                    _MessageGenerationInspectionDocument(
-                        generations=[mg["generation"]],
-                        generation_names=[
-                            "selection"
-                            if mg["generation"]["schema_name"]
-                            in ["UtteranceCompositionSchema", "UtteranceSelectionSchema"]
-                            else "message_generation"
-                        ],
-                        messages=mg["messages"],
-                    )
-                    for mg in doc["message_generations"]
-                ],
-                preparation_iterations=doc["preparation_iterations"],
-            )
-
-        async def v0_4_0_to_v0_6_0(doc: BaseDocument) -> Optional[BaseDocument]:
-            doc = cast(_InspectionDocument, doc)
-            return _InspectionDocument(
-                id=doc["id"],
-                version=Version.String("0.6.0"),
-                session_id=doc["session_id"],
-                correlation_id=doc["correlation_id"],
-                message_generations=doc["message_generations"],
-                preparation_iterations=doc["preparation_iterations"],
-            )
-
-        return await DocumentMigrationHelper[_InspectionDocument](
-            self,
-            {
-                "0.1.0": v0_1_0_to_v0_2_0,
-                "0.2.0": v0_2_0_to_v0_3_0,
-                "0.3.0": v0_3_0_to_v0_4_0,
-                "0.4.0": v0_4_0_to_v0_6_0,
+                "0.6.0": v0_6_0_to_v0_7_0,
             },
         ).migrate(doc)
 
@@ -843,11 +801,6 @@ class SessionDocumentStore(SessionStore):
                 name="events",
                 schema=_EventDocument,
                 document_loader=self._event_document_loader,
-            )
-            self._inspection_collection = await self._database.get_or_create_collection(
-                name="inspections",
-                schema=_InspectionDocument,
-                document_loader=self._inspection_document_loader,
             )
 
         return self
@@ -876,12 +829,14 @@ class SessionDocumentStore(SessionStore):
         if "agent_states" in params:
             doc_params["agent_states"] = [
                 _AgentStateDocument(
-                    correlation_id=s.correlation_id,
+                    trace_id=s.trace_id,
                     applied_guideline_ids=s.applied_guideline_ids,
                     journey_paths=s.journey_paths,
                 )
                 for s in params["agent_states"]
             ]
+        if "metadata" in params:
+            doc_params["metadata"] = params["metadata"]
 
         return doc_params
 
@@ -901,12 +856,13 @@ class SessionDocumentStore(SessionStore):
             consumption_offsets=session.consumption_offsets,
             agent_states=[
                 _AgentStateDocument(
-                    correlation_id=s.correlation_id,
+                    trace_id=s.trace_id,
                     applied_guideline_ids=s.applied_guideline_ids,
                     journey_paths=s.journey_paths,
                 )
                 for s in session.agent_states
             ],
+            metadata=session.metadata,
         )
 
     def _deserialize_session(
@@ -924,12 +880,13 @@ class SessionDocumentStore(SessionStore):
             consumption_offsets=session_document["consumption_offsets"],
             agent_states=[
                 AgentState(
-                    correlation_id=s["correlation_id"],
+                    trace_id=s["trace_id"],
                     applied_guideline_ids=s["applied_guideline_ids"],
                     journey_paths=s["journey_paths"],
                 )
                 for s in session_document["agent_states"]
             ],
+            metadata=session_document.get("metadata", {}),
         )
 
     def _serialize_event(
@@ -945,7 +902,7 @@ class SessionDocumentStore(SessionStore):
             source=event.source.value,
             kind=event.kind.value,
             offset=event.offset,
-            correlation_id=event.correlation_id,
+            trace_id=event.trace_id,
             data=event.data,
             deleted=event.deleted,
         )
@@ -960,116 +917,9 @@ class SessionDocumentStore(SessionStore):
             source=EventSource(event_document["source"]),
             kind=EventKind(event_document["kind"]),
             offset=event_document["offset"],
-            correlation_id=event_document["correlation_id"],
+            trace_id=event_document["trace_id"],
             data=event_document["data"],
             deleted=event_document["deleted"],
-        )
-
-    def _serialize_inspection(
-        self,
-        inspection: Inspection,
-        session_id: SessionId,
-        correlation_id: str,
-    ) -> _InspectionDocument:
-        def serialize_generation_info(generation: GenerationInfo) -> _GenerationInfoDocument:
-            return _GenerationInfoDocument(
-                schema_name=generation.schema_name,
-                model=generation.model,
-                duration=generation.duration,
-                usage=_UsageInfoDocument(
-                    input_tokens=generation.usage.input_tokens,
-                    output_tokens=generation.usage.output_tokens,
-                    extra=generation.usage.extra,
-                ),
-            )
-
-        return _InspectionDocument(
-            id=ObjectId(generate_id()),
-            version=self.VERSION.to_string(),
-            session_id=session_id,
-            correlation_id=correlation_id,
-            message_generations=[
-                _MessageGenerationInspectionDocument(
-                    generations=[
-                        serialize_generation_info(generation_info)
-                        for generation_info in m.generations.values()
-                    ],
-                    generation_names=list(m.generations.keys()),
-                    messages=m.messages,
-                )
-                for m in inspection.message_generations
-            ],
-            preparation_iterations=[
-                {
-                    "guideline_matches": i.guideline_matches,
-                    "tool_calls": i.tool_calls,
-                    "terms": i.terms,
-                    "context_variables": i.context_variables,
-                    "generations": _PreparationIterationGenerationsDocument(
-                        guideline_match=_GuidelineMatchInspectionDocument(
-                            total_duration=i.generations.guideline_matching.total_duration,
-                            batches=[
-                                serialize_generation_info(g)
-                                for g in i.generations.guideline_matching.batches
-                            ],
-                        ),
-                        tool_calls=[serialize_generation_info(g) for g in i.generations.tool_calls],
-                    ),
-                }
-                for i in inspection.preparation_iterations
-            ],
-        )
-
-    def _deserialize_message_inspection(
-        self,
-        inspection_document: _InspectionDocument,
-    ) -> Inspection:
-        def deserialize_generation_info(
-            generation_document: _GenerationInfoDocument,
-        ) -> GenerationInfo:
-            return GenerationInfo(
-                schema_name=generation_document["schema_name"],
-                model=generation_document["model"],
-                duration=generation_document["duration"],
-                usage=UsageInfo(
-                    input_tokens=generation_document["usage"]["input_tokens"],
-                    output_tokens=generation_document["usage"]["output_tokens"],
-                    extra=generation_document["usage"]["extra"],
-                ),
-            )
-
-        return Inspection(
-            message_generations=[
-                MessageGenerationInspection(
-                    generations={
-                        m["generation_names"][i]: deserialize_generation_info(m["generations"][i])
-                        for i in range(len(m["generation_names"]))
-                    },
-                    messages=m["messages"],
-                )
-                for m in inspection_document["message_generations"]
-            ],
-            preparation_iterations=[
-                PreparationIteration(
-                    guideline_matches=i["guideline_matches"],
-                    tool_calls=i["tool_calls"],
-                    terms=i["terms"],
-                    context_variables=i["context_variables"],
-                    generations=PreparationIterationGenerations(
-                        guideline_matching=GuidelineMatchingInspection(
-                            total_duration=i["generations"]["guideline_match"]["total_duration"],
-                            batches=[
-                                deserialize_generation_info(g)
-                                for g in i["generations"]["guideline_match"]["batches"]
-                            ],
-                        ),
-                        tool_calls=[
-                            deserialize_generation_info(g) for g in i["generations"]["tool_calls"]
-                        ],
-                    ),
-                )
-                for i in inspection_document["preparation_iterations"]
-            ],
         )
 
     @override
@@ -1081,6 +931,7 @@ class SessionDocumentStore(SessionStore):
         title: Optional[str] = None,
         mode: Optional[SessionMode] = None,
         workspace_id: Optional[str] = None,
+        metadata: Mapping[str, JSONSerializable] = {},
     ) -> Session:
         async with self._lock.writer_lock:
             creation_utc = creation_utc or datetime.now(timezone.utc)
@@ -1096,6 +947,7 @@ class SessionDocumentStore(SessionStore):
                 consumption_offsets=consumption_offsets,
                 title=title,
                 agent_states=[],
+                metadata=metadata,
                 workspace_id=workspace_id
             )
 
@@ -1175,12 +1027,72 @@ class SessionDocumentStore(SessionStore):
             ]
 
     @override
+    async def set_metadata(
+        self,
+        session_id: SessionId,
+        key: str,
+        value: JSONSerializable,
+    ) -> Session:
+        async with self._lock.writer_lock:
+            session_document = await self._session_collection.find_one({"id": {"$eq": session_id}})
+
+            if not session_document:
+                raise ItemNotFoundError(item_id=UniqueId(session_id))
+
+            updated_metadata = {**session_document["metadata"], key: value}
+
+            result = await self._session_collection.update_one(
+                filters={"id": {"$eq": session_id}},
+                params={
+                    "metadata": updated_metadata,
+                },
+            )
+
+        assert result.updated_document
+
+        return self._deserialize_session(session_document=result.updated_document)
+
+    @override
+    async def unset_metadata(
+        self,
+        session_id: SessionId,
+        key: str,
+    ) -> Session:
+        async with self._lock.writer_lock:
+            session_document = await self._session_collection.find_one({"id": {"$eq": session_id}})
+
+            if not session_document:
+                raise ItemNotFoundError(item_id=UniqueId(session_id))
+
+            updated_metadata = {k: v for k, v in session_document["metadata"].items() if k != key}
+
+            result = await self._session_collection.update_one(
+                filters={"id": {"$eq": session_id}},
+                params={
+                    "metadata": updated_metadata,
+                },
+            )
+
+        assert result.updated_document
+
+        result = await self._session_collection.update_one(
+            filters={"id": {"$eq": session_id}},
+            params={
+                "metadata": updated_metadata,
+            },
+        )
+
+        assert result.updated_document
+
+        return self._deserialize_session(session_document=result.updated_document)
+
+    @override
     async def create_event(
         self,
         session_id: SessionId,
         source: EventSource,
         kind: EventKind,
-        correlation_id: str,
+        trace_id: str,
         data: JSONSerializable,
         creation_utc: Optional[datetime] = None,
     ) -> Event:
@@ -1200,7 +1112,7 @@ class SessionDocumentStore(SessionStore):
                 kind=kind,
                 offset=offset,
                 creation_utc=creation_utc,
-                correlation_id=correlation_id,
+                trace_id=trace_id,
                 data=data,
                 deleted=False,
             )
@@ -1247,7 +1159,7 @@ class SessionDocumentStore(SessionStore):
         self,
         session_id: SessionId,
         source: Optional[EventSource] = None,
-        correlation_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
         kinds: Sequence[EventKind] = [],
         min_offset: Optional[int] = None,
         exclude_deleted: bool = True,
@@ -1260,7 +1172,7 @@ class SessionDocumentStore(SessionStore):
                 "session_id": {"$eq": session_id},
                 **({"source": {"$eq": source.value}} if source else {}),
                 **({"offset": {"$gte": min_offset}} if min_offset else {}),
-                **({"correlation_id": {"$eq": correlation_id}} if correlation_id else {}),
+                **({"trace_id": {"$eq": trace_id}} if trace_id else {}),
                 **({"deleted": {"$eq": False}} if exclude_deleted else {}),
             }
 
@@ -1281,62 +1193,6 @@ class SessionDocumentStore(SessionStore):
 
         return [self._deserialize_event(d) for d in event_documents]
 
-    @override
-    async def create_inspection(
-        self,
-        session_id: SessionId,
-        correlation_id: str,
-        message_generations: Sequence[MessageGenerationInspection],
-        preparation_iterations: Sequence[PreparationIteration],
-    ) -> Inspection:
-        async with self._lock.writer_lock:
-            if not await self._session_collection.find_one(filters={"id": {"$eq": session_id}}):
-                raise ItemNotFoundError(item_id=UniqueId(session_id), message="Session not found")
-
-            inspection = Inspection(
-                message_generations=message_generations,
-                preparation_iterations=preparation_iterations,
-            )
-
-            await self._inspection_collection.insert_one(
-                document=self._serialize_inspection(
-                    inspection,
-                    session_id,
-                    correlation_id,
-                )
-            )
-
-        return inspection
-
-    @override
-    async def read_inspection(
-        self,
-        session_id: SessionId,
-        correlation_id: str,
-    ) -> Inspection:
-        async with self._lock.reader_lock:
-            if not await self._session_collection.find_one(filters={"id": {"$eq": session_id}}):
-                raise ItemNotFoundError(item_id=UniqueId(session_id), message="Session not found")
-
-            if not await self._event_collection.find_one(
-                filters={
-                    "correlation_id": {"$eq": correlation_id},
-                    "kind": {"$eq": "message"},
-                }
-            ):
-                raise ItemNotFoundError(
-                    item_id=UniqueId(correlation_id), message="Message event not found"
-                )
-
-            if inspection_document := await self._inspection_collection.find_one(
-                filters={"correlation_id": {"$eq": correlation_id}}
-            ):
-                return self._deserialize_message_inspection(inspection_document)
-
-        raise ItemNotFoundError(
-            item_id=UniqueId(correlation_id), message="Message inspection not found"
-        )
-
 
 class SessionListener(ABC):
     @abstractmethod
@@ -1346,7 +1202,7 @@ class SessionListener(ABC):
         kinds: Sequence[EventKind] = [],
         min_offset: Optional[int] = None,
         source: Optional[EventSource] = None,
-        correlation_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
         timeout: Timeout = Timeout.infinite(),
     ) -> bool: ...
 
@@ -1362,7 +1218,7 @@ class PollingSessionListener(SessionListener):
         kinds: Sequence[EventKind] = [],
         min_offset: Optional[int] = None,
         source: Optional[EventSource] = None,
-        correlation_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
         timeout: Timeout = Timeout.infinite(),
     ) -> bool:
         # Trigger exception if not found
@@ -1374,7 +1230,7 @@ class PollingSessionListener(SessionListener):
                 min_offset=min_offset,
                 source=source,
                 kinds=kinds,
-                correlation_id=correlation_id,
+                trace_id=trace_id,
             )
 
             if events:
