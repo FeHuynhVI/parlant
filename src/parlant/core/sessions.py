@@ -897,6 +897,7 @@ class SessionDocumentStore(SessionStore):
             agent_id=session.agent_id,
             mode=session.mode,
             title=session.title if session.title else None,
+            workspace_id=session.workspace_id if session.workspace_id else None,
             consumption_offsets=session.consumption_offsets,
             agent_states=[
                 _AgentStateDocument(
