@@ -269,6 +269,7 @@ class Actions:
         agent_id: str,
         customer_id: Optional[str] = None,
         title: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> Session:
         client = cast(ParlantClient, ctx.obj.client)
 
@@ -277,6 +278,7 @@ class Actions:
             customer_id=customer_id,
             allow_greeting=False,
             title=title,
+            workspace_id=workspace_id
         )
 
     @staticmethod
@@ -1735,8 +1737,14 @@ class Interface:
         agent_id: str,
         customer_id: Optional[str] = None,
         title: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> None:
-        session = Actions.create_session(ctx, agent_id, customer_id, title)
+        session = Actions.create_session(
+            ctx,
+            agent_id,
+            customer_id,
+            title, workspace_id=workspace_id
+        )
         Interface._write_success(f"Added session (id: {session.id})")
         Interface._render_sessions([session])
 
@@ -3427,11 +3435,12 @@ async def async_main() -> None:
         agent_id: str,
         customer_id: Optional[str],
         title: Optional[str],
+        workspace_id: Optional[str],
     ) -> None:
         agent_id = agent_id if agent_id else Interface.get_default_agent(ctx)
         assert agent_id
 
-        Interface.create_session(ctx, agent_id, customer_id, title)
+        Interface.create_session(ctx, agent_id, customer_id, title, workspace_id=workspace_id)
 
     @session.command("delete", help="Delete a session")
     @click.option("--id", type=str, metavar="ID", help="Session ID", required=True)

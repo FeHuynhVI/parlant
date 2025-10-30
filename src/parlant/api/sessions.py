@@ -226,6 +226,7 @@ class SessionCreationParamsDTO(
     agent_id: SessionAgentIdPath
     customer_id: SessionCreationParamsCustomerIdField = None
     title: SessionTitleField | None = None
+    workspace_id: str | None = None
 
 
 message_example = "Hello, I need help with my order"
@@ -306,7 +307,6 @@ class EventCreationParamsDTO(
     guidelines: list[AgentMessageGuidelineDTO] | None = None
     participant: ParticipantDTO | None = None
     status: SessionStatusDTO | None = None
-
 
 EventIdPath: TypeAlias = Annotated[
     EventId,
@@ -1273,6 +1273,7 @@ def create_router(
             agent_id=params.agent_id,
             title=params.title,
             allow_greeting=allow_greeting,
+            workspace_id=params.workspace_id
         )
 
         return SessionDTO(

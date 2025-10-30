@@ -269,6 +269,7 @@ class Session:
     agent_id: AgentId
     mode: SessionMode
     title: Optional[str]
+    workspace_id: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
     agent_states: Sequence[AgentState]
 
@@ -290,6 +291,7 @@ class SessionStore(ABC):
         agent_id: AgentId,
         creation_utc: Optional[datetime] = None,
         title: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> Session: ...
 
     @abstractmethod
@@ -1075,6 +1077,7 @@ class SessionDocumentStore(SessionStore):
         creation_utc: Optional[datetime] = None,
         title: Optional[str] = None,
         mode: Optional[SessionMode] = None,
+        workspace_id: Optional[str] = None,
     ) -> Session:
         async with self._lock.writer_lock:
             creation_utc = creation_utc or datetime.now(timezone.utc)
@@ -1090,6 +1093,7 @@ class SessionDocumentStore(SessionStore):
                 consumption_offsets=consumption_offsets,
                 title=title,
                 agent_states=[],
+                workspace_id=workspace_id
             )
 
             await self._session_collection.insert_one(document=self._serialize_session(session))
