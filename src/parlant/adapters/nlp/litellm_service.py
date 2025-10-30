@@ -127,7 +127,7 @@ class LiteLLMSchematicGenerator(BaseSchematicGenerator[T]):
         return self._tokenizer
 
     @override
-    async def generate(
+    async def do_generate(
         self,
         prompt: PromptBuilder | str,
         hints: Mapping[str, Any] = {},
@@ -270,7 +270,7 @@ Please set LITELLM_PROVIDER_API_KEY in your environment before running Parlant.
 
     @override
     async def get_embedder(self) -> Embedder:
-        return AITeamVNAIEmbedder()
+        return AITeamVNAIEmbedder(self._logger, self._meter)
         #return JinaAIEmbedder(self._logger, self._meter)
 
     @override

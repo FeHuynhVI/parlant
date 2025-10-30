@@ -174,8 +174,12 @@ class JinaAIEmbedder(HuggingFaceEmbedder):
 
 
 class AITeamVNAIEmbedder(HuggingFaceEmbedder):
-    def __init__(self) -> None:
-        super().__init__("AITeamVN/Vietnamese_Embedding_v2")
+    def __init__(self, logger: Logger, meter: Meter) -> None:
+        super().__init__(
+            logger=logger,
+            meter=meter,
+            model_name="AITeamVN/Vietnamese_Embedding_v2"
+        )
 
     @property
     @override
