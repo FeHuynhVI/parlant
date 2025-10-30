@@ -2537,8 +2537,6 @@ class Server:
                 agent = await self.get_agent(id=ctx.agent.id)
                 customer = await self.get_customer(id=ctx.customer.id)
                 
-                print("AAAAAAAAAAAAAAAAA", ctx.session.workspace_id)
-
                 coroutine = retriever(
                     RetrieverContext(
                         server=self,
