@@ -409,6 +409,7 @@ class _SessionDocument(TypedDict, total=False):
     agent_id: AgentId
     mode: SessionMode
     title: Optional[str]
+    workspace_id: Optional[str]
     consumption_offsets: Mapping[ConsumerId, int]
     agent_states: Sequence[_AgentStateDocument]
 
@@ -918,6 +919,7 @@ class SessionDocumentStore(SessionStore):
             agent_id=session_document["agent_id"],
             mode=session_document["mode"],
             title=session_document["title"],
+            workspace_id=session_document["workspace_id"],
             consumption_offsets=session_document["consumption_offsets"],
             agent_states=[
                 AgentState(
