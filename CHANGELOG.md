@@ -21,6 +21,10 @@ All notable changes to Parlant will be documented here.
 - Rename ContextualCorrelator to Tracer
 - Add OpenTelemetry integration for Meter, Logger and Tracer
 - Add API for CRUD operations on session metadata
+- Add deferred retrievers
+- Allow controlling perceived performance policy per agent
+- Expose IoC container in server object
+- Support code-based, custom guideline matchers
 
 ## [3.0.3] - 2025-10-23
 
@@ -30,7 +34,6 @@ All notable changes to Parlant will be documented here.
 - Bump versions of OpenTelemetry
 - Made ChromaDB an extra package parlant[chroma]
 - Update NPM dependencies for integrated UI
-
 
 ## [3.0.2] - 2025-08-27
 

@@ -20,8 +20,16 @@ from typing import Annotated, Mapping, Sequence, TypeAlias, cast
 
 
 from parlant.api.authorization import AuthorizationPolicy, Operation
-from parlant.api.common import GuidelineIdField, ExampleJson, JSONSerializableDTO, apigen_config
+from parlant.api.common import (
+    GuidelineIdField,
+    ExampleJson,
+    JSONSerializableDTO,
+    SortDirectionDTO,
+    apigen_config,
+    sort_direction_dto_to_sort_direction,
+)
 from parlant.api.glossary import TermSynonymsField, TermIdPath, TermNameField, TermDescriptionField
+from parlant.core.app_modules.common import decode_cursor, encode_cursor
 from parlant.core.app_modules.sessions import Moderation
 from parlant.core.agents import AgentId
 from parlant.core.application import Application
@@ -209,6 +217,15 @@ class SessionDTO(
     mode: SessionModeField
     consumption_offsets: ConsumptionOffsetsDTO
     metadata: SessionMetadataField
+
+
+class SessionListingDTO(DefaultBaseModel):
+    """Paginated response for sessions"""
+
+    items: Sequence[SessionDTO]
+    total_count: int
+    has_more: bool
+    next_cursor: str | None = None
 
 
 SessionCreationParamsCustomerIdField: TypeAlias = Annotated[
@@ -1203,6 +1220,32 @@ KindsQuery: TypeAlias = Annotated[
     ),
 ]
 
+LimitQuery: TypeAlias = Annotated[
+    int,
+    Query(
+        description="Maximum number of items to return",
+        ge=1,
+        le=100,
+        examples=[10, 25],
+    ),
+]
+
+CursorQuery: TypeAlias = Annotated[
+    str,
+    Query(
+        description="Pagination cursor for fetching the next page of results",
+        examples=["AAABjnBU9gBl/0BQt1axI0VniQI="],
+    ),
+]
+
+SortQuery: TypeAlias = Annotated[
+    SortDirectionDTO,
+    Query(
+        description="Sort direction for results",
+        examples=["asc", "desc"],
+    ),
+]
+
 
 def agent_message_guideline_dto_to_utterance_request(
     guideline: AgentMessageGuidelineDTO,
@@ -1305,7 +1348,7 @@ def create_router(
                 "description": "Session successfully created. Returns the complete session object.",
                 "content": {"application/json": {"example": session_example}},
             },
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in request parameters"
             },
         },
@@ -1388,14 +1431,26 @@ def create_router(
     @router.get(
         "",
         operation_id="list_sessions",
-        response_model=Sequence[SessionDTO],
+        response_model=SessionListingDTO | Sequence[SessionDTO],
         responses={
             status.HTTP_200_OK: {
-                "description": "List of all matching sessions",
-                "content": {"application/json": {"example": [session_example]}},
+                "description": (
+                    "If a limit is provided, a paginated list of sessions will be returned. "
+                    "Otherwise, the full list of sessions will be returned."
+                ),
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "items": [session_example],
+                            "total_count": 1,
+                            "has_more": False,
+                            "next_cursor": None,
+                        }
+                    }
+                },
             },
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
-                "description": "Validation error in request parameters"
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
+                "description": "Validation error in the request parameters."
             },
         },
         **apigen_config(group_name=API_GROUP, method_name="list"),
@@ -1404,33 +1459,63 @@ def create_router(
         request: Request,
         agent_id: AgentIdQuery | None = None,
         customer_id: CustomerIdQuery | None = None,
-    ) -> Sequence[SessionDTO]:
-        """Lists all sessions matching the specified filters.
+        limit: LimitQuery | None = None,
+        cursor: CursorQuery | None = None,
+        sort: SortQuery | None = None,
+    ) -> SessionListingDTO | Sequence[SessionDTO]:
+        """Lists all sessions matching the specified filters with pagination support.
 
-        Can filter by agent_id and/or customer_id. Returns all sessions if no
-        filters are provided."""
+        Can filter by agent_id and/or customer_id. Supports cursor-based pagination
+        with configurable sort direction."""
         await authorization_policy.authorize(request=request, operation=Operation.LIST_SESSIONS)
 
-        sessions = await app.sessions.find(
+        sessions_result = await app.sessions.find(
             agent_id=agent_id,
             customer_id=customer_id,
+            limit=limit,
+            cursor=decode_cursor(cursor) if cursor else None,
+            sort_direction=sort_direction_dto_to_sort_direction(sort) if sort else None,
         )
 
-        return [
-            SessionDTO(
-                id=s.id,
-                agent_id=s.agent_id,
-                creation_utc=s.creation_utc,
-                title=s.title,
-                customer_id=s.customer_id,
-                consumption_offsets=ConsumptionOffsetsDTO(
-                    client=s.consumption_offsets["client"],
-                ),
-                mode=SessionModeDTO(s.mode),
-                metadata=s.metadata,
-            )
-            for s in sessions
-        ]
+        if limit is None:
+            return [
+                SessionDTO(
+                    id=s.id,
+                    agent_id=s.agent_id,
+                    creation_utc=s.creation_utc,
+                    title=s.title,
+                    customer_id=s.customer_id,
+                    consumption_offsets=ConsumptionOffsetsDTO(
+                        client=s.consumption_offsets["client"],
+                    ),
+                    mode=SessionModeDTO(s.mode),
+                    metadata=s.metadata,
+                )
+                for s in sessions_result.items
+            ]
+
+        return SessionListingDTO(
+            items=[
+                SessionDTO(
+                    id=s.id,
+                    agent_id=s.agent_id,
+                    creation_utc=s.creation_utc,
+                    title=s.title,
+                    customer_id=s.customer_id,
+                    consumption_offsets=ConsumptionOffsetsDTO(
+                        client=s.consumption_offsets["client"],
+                    ),
+                    mode=SessionModeDTO(s.mode),
+                    metadata=s.metadata,
+                )
+                for s in sessions_result.items
+            ],
+            total_count=sessions_result.total_count,
+            has_more=sessions_result.has_more,
+            next_cursor=encode_cursor(sessions_result.next_cursor)
+            if sessions_result.next_cursor
+            else None,
+        )
 
     @router.delete(
         "/{session_id}",
@@ -1461,7 +1546,7 @@ def create_router(
             status.HTTP_204_NO_CONTENT: {
                 "description": "All matching sessions successfully deleted"
             },
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in request parameters"
             },
         },
@@ -1478,12 +1563,12 @@ def create_router(
         filters are provided."""
         await authorization_policy.authorize(request=request, operation=Operation.DELETE_SESSIONS)
 
-        sessions = await app.sessions.find(
+        sessions_result = await app.sessions.find(
             agent_id=agent_id,
             customer_id=customer_id,
         )
 
-        for s in sessions:
+        for s in sessions_result.items:
             await app.sessions.delete(s.id)
 
     @router.patch(
@@ -1492,7 +1577,7 @@ def create_router(
         responses={
             status.HTTP_200_OK: {"description": "Session successfully updated"},
             status.HTTP_404_NOT_FOUND: {"description": "Session not found"},
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in update parameters"
             },
         },
@@ -1573,7 +1658,7 @@ def create_router(
                 "content": {"application/json": {"example": event_example}},
             },
             status.HTTP_404_NOT_FOUND: {"description": "Session not found"},
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in event parameters"
             },
         },
@@ -1614,7 +1699,7 @@ def create_router(
                 return await _add_human_agent_message_on_behalf_of_ai_agent(session_id, params)
             else:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail='Only "customer", "human_agent", and "human_agent_on_behalf_of_ai_agent" sources are supported for direct posting.',
                 )
 
@@ -1632,7 +1717,7 @@ def create_router(
 
         else:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Only message, custom and status events can currently be added manually",
             )
 
@@ -1657,14 +1742,14 @@ def create_router(
 
         if params.status is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail='Missing "status" field for status event',
             )
 
         raw_data = params.data or {}
         if not isinstance(raw_data, dict):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail='Status event "data" must be a JSON object',
             )
 
@@ -1684,7 +1769,7 @@ def create_router(
     ) -> EventDTO:
         if not params.message:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Missing 'message' field for event",
             )
 
@@ -1704,7 +1789,7 @@ def create_router(
     ) -> EventDTO:
         if params.message:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="If you add an agent message, you cannot specify what the message will be, as it will be auto-generated by the agent.",
             )
 
@@ -1724,12 +1809,12 @@ def create_router(
     ) -> EventDTO:
         if not params.message:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Missing 'message' field for event",
             )
         if not params.participant or not params.participant.display_name:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Missing 'participant' with 'display_name' for human agent message",
             )
 
@@ -1747,7 +1832,7 @@ def create_router(
     ) -> EventDTO:
         if not params.message:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Missing 'data' field for message",
             )
 
@@ -1774,7 +1859,7 @@ def create_router(
     ) -> EventDTO:
         if not params.data:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Missing 'data' field for custom event",
             )
 
@@ -1810,7 +1895,7 @@ def create_router(
             status.HTTP_404_NOT_FOUND: {
                 "description": "Session not found",
             },
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in request parameters"
             },
             status.HTTP_504_GATEWAY_TIMEOUT: {
@@ -1898,7 +1983,7 @@ def create_router(
         responses={
             status.HTTP_204_NO_CONTENT: {"description": "Events successfully deleted"},
             status.HTTP_404_NOT_FOUND: {"description": "Session not found"},
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in request parameters"
             },
         },
@@ -1917,6 +2002,6 @@ def create_router(
         try:
             await app.sessions.delete_events(session_id=session_id, min_offset=min_offset)
         except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"{e}")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"{e}")
 
     return router

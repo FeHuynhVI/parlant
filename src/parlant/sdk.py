@@ -19,6 +19,7 @@ from collections import defaultdict
 from contextlib import AsyncExitStack
 import contextvars
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import enum
 from hashlib import md5
 import importlib.util
@@ -84,6 +85,7 @@ from parlant.core.agents import (
 from parlant.core.async_utils import Timeout, default_done_callback
 from parlant.core.capabilities import CapabilityId, CapabilityStore, CapabilityVectorStore
 from parlant.core.common import (
+    DefaultBaseModel,
     IdGenerator,
     ItemNotFoundError,
     JSONSerializable,
@@ -107,8 +109,25 @@ from parlant.core.customers import (
 from parlant.core.emissions import EmittedEvent, EventEmitterFactory
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder, PromptSection
 from parlant.core.engines.alpha.hooks import EngineHook, EngineHookResult, EngineHooks
-from parlant.core.engines.alpha.loaded_context import LoadedContext, Interaction, InteractionMessage
+from parlant.core.engines.alpha.engine_context import (
+    EngineContext,
+    LoadedContext,  # type: ignore
+    Interaction,
+    InteractionMessage,
+)
 from parlant.core.engines.alpha.entity_context import EntityContext
+from parlant.core.engines.alpha.guideline_matching.guideline_match import (
+    GuidelineMatch as _GuidelineMatch,
+)
+from parlant.core.engines.alpha.guideline_matching.guideline_matcher import (
+    GuidelineMatchingContext as _GuidelineMatchingContext,
+)
+from parlant.core.engines.alpha.guideline_matching.generic_guideline_matching_strategy_resolver import (
+    GenericGuidelineMatchingStrategyResolver,
+)
+from parlant.core.engines.alpha.guideline_matching.custom_guideline_matching_strategy import (
+    CustomGuidelineMatchingStrategy,
+)
 from parlant.core.glossary import GlossaryStore, GlossaryVectorStore, TermId
 from parlant.core.guideline_tool_associations import (
     GuidelineToolAssociationDocumentStore,
@@ -170,6 +189,7 @@ from parlant.core.evaluations import (
     PayloadKind,
 )
 from parlant.core.guidelines import (
+    Guideline as _Guideline,
     GuidelineContent,
     GuidelineDocumentStore,
     GuidelineId,
@@ -183,7 +203,15 @@ from parlant.core.journeys import (
     JourneyVectorStore,
 )
 from parlant.core.loggers import LogLevel, Logger
-from parlant.core.nlp.service import NLPService
+from parlant.core.nlp.service import (
+    EmbedderHints,
+    ModelGeneration,
+    ModelSize,
+    ModelType,
+    NLPService,
+    SchematicGeneratorHints,
+)
+
 from parlant.core.nlp.moderation import (
     CustomerModerationContext,
     ModerationCheck,
@@ -201,6 +229,7 @@ from parlant.core.engines.alpha.optimization_policy import (
 )
 from parlant.core.engines.alpha.perceived_performance_policy import (
     PerceivedPerformancePolicy,
+    PerceivedPerformancePolicyProvider,
     NullPerceivedPerformancePolicy,
     BasicPerceivedPerformancePolicy,
     VoiceOptimizedPerceivedPerformancePolicy,
@@ -408,15 +437,51 @@ class NLPServices:
 
         return FireworksService(container[Logger], container[Meter])
 
+    @staticmethod
+    def openrouter(
+        container: Container | None = None,
+    ) -> NLPService | Callable[[Container], NLPService]:
+        """
+        Returns a callable that creates an OpenRouter NLPService instance using the provided container.
+        If container is None, the callable expects the container to be provided later (by the Server).
+        All configuration is done via environment variables.
+        """
+        from parlant.adapters.nlp.openrouter_service import OpenRouterService
+
+        def factory(c: Container) -> NLPService:
+            if error := OpenRouterService.verify_environment():
+                raise SDKError(error)
+            return OpenRouterService(
+                c[Logger],
+                c[Meter],
+            )
+
+        if container is not None:
+            return factory(container)
+
+        return factory
+
+    @staticmethod
+    def zhipu(container: Container) -> NLPService:
+        """Creates a Zhipu AI NLPService instance using the provided container."""
+        from parlant.adapters.nlp.zhipu_service import ZhipuService
+
+        if error := ZhipuService.verify_environment():
+            raise SDKError(error)
+
+        return ZhipuService(container[Logger], container[Meter])
+
 
 class _CachedGuidelineEvaluation(TypedDict, total=False):
     id: ObjectId
+    creation_utc: str
     version: Version.String
     properties: dict[str, JSONSerializable]
 
 
 class _CachedJourneyEvaluation(TypedDict, total=False):
     id: ObjectId
+    creation_utc: str
     version: Version.String
     node_properties: dict[JourneyStateId, dict[str, JSONSerializable]]
     edge_properties: dict[JourneyTransitionId, dict[str, JSONSerializable]]
@@ -610,6 +675,7 @@ class _CachedEvaluator:
             await self._guideline_collection.insert_one(
                 {
                     "id": ObjectId(_hash),
+                    "creation_utc": datetime.now(timezone.utc).isoformat(),
                     "version": Version.String(VERSION),
                     "properties": cast(InvoiceGuidelineData, invoice.data).properties_proposition
                     or {},
@@ -683,6 +749,7 @@ class _CachedEvaluator:
             await self._journey_collection.insert_one(
                 {
                     "id": ObjectId(_hash),
+                    "creation_utc": datetime.now(timezone.utc).isoformat(),
                     "version": Version.String(VERSION),
                     "node_properties": cast(
                         InvoiceJourneyData, invoice.data
@@ -726,8 +793,68 @@ class Relationship:
 
 
 @dataclass(frozen=True)
+class GuidelineMatch:
+    """Result of a custom guideline matcher."""
+
+    matched: bool
+    """Whether the guideline matched the current context."""
+
+    rationale: str
+    """Explanation of why the guideline matched or didn't match."""
+
+
+@dataclass
+class GuidelineMatchingContext:
+    """Context for custom guideline matchers, providing information about the current interaction."""
+
+    server: "Server"
+    container: Container
+    logger: Logger
+    tracer: Tracer
+    session: "Session"
+    agent: "Agent"
+    customer: "Customer"
+    variables: Mapping["Variable", JSONSerializable]
+    interaction: Interaction
+
+    @classmethod
+    async def _from_core(
+        cls,
+        core_ctx: _GuidelineMatchingContext,
+        server: "Server",
+        container: Container,
+    ) -> "GuidelineMatchingContext":
+        """Convert a core GuidelineMatchingContext to an SDK GuidelineMatchingContext."""
+        agent = await server.get_agent(id=core_ctx.agent.id)
+
+        return cls(
+            server=server,
+            container=container,
+            logger=container[Logger],
+            tracer=container[Tracer],
+            session=core_ctx.session,
+            agent=agent,
+            customer=await server.get_customer(id=core_ctx.customer.id),
+            variables={
+                await agent.get_variable(id=var.id): val.data
+                for var, val in core_ctx.context_variables
+            },
+            interaction=Interaction(core_ctx.interaction_history),
+        )
+
+
+async def _match_always(ctx: GuidelineMatchingContext, g: Guideline) -> GuidelineMatch:
+    return GuidelineMatch(
+        matched=True,
+        rationale="Always relevant",
+    )
+
+
+@dataclass(frozen=True)
 class Guideline:
     """A guideline that defines a condition and an action to be taken."""
+
+    MATCH_ALWAYS = _match_always
 
     id: GuidelineId
     condition: str
@@ -1374,6 +1501,8 @@ class Journey:
         tools: Iterable[ToolEntry] = [],
         metadata: dict[str, JSONSerializable] = {},
         canned_responses: Sequence[CannedResponseId] = [],
+        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        | None = None,
     ) -> Guideline:
         """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
 
@@ -1400,11 +1529,12 @@ class Journey:
                     tag_id=tag_id,
                 )
 
-        self._server._add_guideline_evaluation(
-            guideline.id,
-            GuidelineContent(condition=condition, action=action),
-            tool_ids,
-        )
+        if matcher is None:
+            self._server._add_guideline_evaluation(
+                guideline.id,
+                GuidelineContent(condition=condition, action=action),
+                tool_ids,
+            )
 
         await self._container[RelationshipStore].create_relationship(
             source=RelationshipEntity(
@@ -1424,7 +1554,7 @@ class Journey:
                 tool_id=ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name),
             )
 
-        return Guideline(
+        result_guideline = Guideline(
             id=guideline.id,
             condition=condition,
             action=action,
@@ -1433,6 +1563,36 @@ class Journey:
             _server=self._server,
             _container=self._container,
         )
+
+        if matcher is not None:
+            # Create a shim that translates between SDK and core types
+            async def shim_matcher(
+                core_ctx: _GuidelineMatchingContext, core_guideline: _Guideline
+            ) -> _GuidelineMatch:
+                sdk_ctx = await GuidelineMatchingContext._from_core(
+                    core_ctx=core_ctx,
+                    server=self._server,
+                    container=self._container,
+                )
+                result = await matcher(sdk_ctx, result_guideline)
+
+                return _GuidelineMatch(
+                    guideline=core_guideline,
+                    score=10 if result.matched else 1,
+                    rationale=result.rationale,
+                )
+
+            strategy = CustomGuidelineMatchingStrategy(
+                guideline=guideline,
+                matcher=shim_matcher,
+                logger=self._container[Logger],
+            )
+
+            self._container[GenericGuidelineMatchingStrategyResolver].guideline_overrides[
+                guideline.id
+            ] = strategy
+
+        return result_guideline
 
     async def create_observation(
         self,
@@ -1737,6 +1897,24 @@ class RetrieverResult:
     canned_response_fields: Mapping[str, Any] = field(default_factory=dict)
 
 
+DeferredRetriever: TypeAlias = Callable[[EngineContext], Awaitable[RetrieverResult | None]]
+"""A deferred retriever callable that receives a pre-response EngineContext and returns a RetrieverResult or None.
+
+Returning this allows retrievers to start work in parallel during on_acknowledged, but defer the final decision
+of what data to return (or whether to return any data at all) until on_generating_messages, when the
+full EngineContext including matched guidelines and tool insights is available.
+"""
+
+RetrieverFunction: TypeAlias = Callable[
+    [RetrieverContext], Awaitable[RetrieverResult | None | DeferredRetriever]
+]
+"""A retriever function that can either return a result directly, or return a deferred callable.
+
+When a RetrieverResult or None is returned directly, it's used as-is.
+When a DeferredRetriever is returned, it will be called later with the EngineContext to get the final result.
+"""
+
+
 class CompositionMode(enum.Enum):
     """Defines the composition mode for the agent, which determines how responses are generated."""
 
@@ -1794,9 +1972,7 @@ class Agent:
     composition_mode: CompositionMode
     tags: Sequence[TagId]
 
-    retrievers: Mapping[str, Callable[[RetrieverContext], Awaitable[JSONSerializable]]] = field(
-        default_factory=dict
-    )
+    retrievers: Mapping[str, RetrieverFunction] = field(default_factory=dict)
 
     @property
     def experimental_features(self) -> ExperimentalAgentFeatures:
@@ -1845,6 +2021,8 @@ class Agent:
         tools: Iterable[ToolEntry] = [],
         metadata: dict[str, JSONSerializable] = {},
         canned_responses: Sequence[CannedResponseId] = [],
+        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        | None = None,
     ) -> Guideline:
         """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
         self._server._advance_creation_progress()
@@ -1871,11 +2049,12 @@ class Agent:
                     tag_id=tag_id,
                 )
 
-        self._server._add_guideline_evaluation(
-            guideline.id,
-            GuidelineContent(condition=condition, action=action),
-            tool_ids,
-        )
+        if matcher is None:
+            self._server._add_guideline_evaluation(
+                guideline.id,
+                GuidelineContent(condition=condition, action=action),
+                tool_ids,
+            )
 
         for t in list(tools):
             await self._container[GuidelineToolAssociationStore].create_association(
@@ -1883,7 +2062,7 @@ class Agent:
                 tool_id=ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name),
             )
 
-        return Guideline(
+        result_guideline = Guideline(
             id=guideline.id,
             condition=condition,
             action=action,
@@ -1892,6 +2071,36 @@ class Agent:
             _server=self._server,
             _container=self._container,
         )
+
+        if matcher is not None:
+            # Create a shim that translates between SDK and core types
+            async def shim_matcher(
+                core_ctx: _GuidelineMatchingContext, core_guideline: _Guideline
+            ) -> _GuidelineMatch:
+                sdk_ctx = await GuidelineMatchingContext._from_core(
+                    core_ctx=core_ctx,
+                    server=self._server,
+                    container=self._container,
+                )
+                result = await matcher(sdk_ctx, result_guideline)
+
+                return _GuidelineMatch(
+                    guideline=core_guideline,
+                    score=10 if result.matched else 1,
+                    rationale=result.rationale,
+                )
+
+            strategy = CustomGuidelineMatchingStrategy(
+                guideline=guideline,
+                matcher=shim_matcher,
+                logger=self._container[Logger],
+            )
+
+            self._container[GenericGuidelineMatchingStrategyResolver].guideline_overrides[
+                guideline.id
+            ] = strategy
+
+        return result_guideline
 
     async def create_observation(
         self,
@@ -2086,7 +2295,7 @@ class Agent:
 
     async def attach_retriever(
         self,
-        retriever: Callable[[RetrieverContext], Awaitable[JSONSerializable | RetrieverResult]],
+        retriever: RetrieverFunction,
         id: str | None = None,
     ) -> None:
         """Attaches a retriever function to the agent, allowing it to be used in interactions."""
@@ -2095,7 +2304,7 @@ class Agent:
             id = f"retriever-{len(self.retrievers) + 1}"
 
         cast(
-            dict[str, Callable[[RetrieverContext], Awaitable[JSONSerializable | RetrieverResult]]],
+            dict[str, RetrieverFunction],
             self.retrievers,
         )[id] = retriever
 
@@ -2184,7 +2393,7 @@ class Server:
         initialize_container: A callable to perform additional initialization after the container is set up.
     """
 
-    _current_server_var: contextvars.ContextVar[Optional[Server]] = contextvars.ContextVar(
+    _current_server_var = contextvars.ContextVar[Optional["Server"]](
         "parlant_current_server", default=None
     )
 
@@ -2224,7 +2433,7 @@ class Server:
         self._initialize = initialize_container
         self._retrievers: dict[
             AgentId,
-            dict[str, Callable[[RetrieverContext], Awaitable[JSONSerializable | RetrieverResult]]],
+            dict[str, RetrieverFunction],
         ] = defaultdict(dict)
         self._exit_stack = AsyncExitStack()
 
@@ -2251,6 +2460,11 @@ class Server:
         )
         self._creation_progress_k = 0
         self._creation_progress_task_id: TaskID
+
+    @property
+    def container(self) -> Container:
+        """Returns the dependency injection container."""
+        return self._container
 
     def _advance_creation_progress(self) -> None:
         if self._creation_progress is None:
@@ -2536,15 +2750,15 @@ class Server:
             c: Container,
             agent_id: AgentId,
             retriever_id: str,
-            retriever: Callable[[RetrieverContext], Awaitable[JSONSerializable | RetrieverResult]],
+            retriever: RetrieverFunction,
         ) -> None:
             tasks_for_this_retriever: dict[
                 str,
-                tuple[Timeout, asyncio.Task[JSONSerializable | RetrieverResult]],
+                tuple[Timeout, asyncio.Task[RetrieverResult | None | DeferredRetriever]],
             ] = {}
 
             async def on_message_acknowledged(
-                ctx: LoadedContext,
+                ctx: EngineContext,
                 payload: Any,
                 exc: Optional[Exception],
             ) -> EngineHookResult:
@@ -2592,7 +2806,10 @@ class Server:
                 tasks_for_this_retriever[ctx.tracer.trace_id] = (
                     Timeout(600),  # Expiration timeout for garbage collection purposes
                     asyncio.create_task(
-                        cast(Coroutine[Any, Any, JSONSerializable | RetrieverResult], coroutine),
+                        cast(
+                            Coroutine[Any, Any, RetrieverResult | None | DeferredRetriever],
+                            coroutine,
+                        ),
                         name=f"Retriever {retriever_id} for agent {agent_id}",
                     ),
                 )
@@ -2600,7 +2817,7 @@ class Server:
                 return EngineHookResult.CALL_NEXT
 
             async def on_generating_messages(
-                ctx: LoadedContext,
+                ctx: EngineContext,
                 payload: Any,
                 exc: Optional[Exception],
             ) -> EngineHookResult:
@@ -2608,15 +2825,21 @@ class Server:
                     _, task = timeout_and_task
                     task_result = await task
 
-                    if isinstance(task_result, RetrieverResult):
-                        retriever_result = task_result
-                    else:
-                        retriever_result = RetrieverResult(
-                            data=task_result,
-                            metadata={},
-                            canned_responses=[],
-                            canned_response_fields={},
-                        )
+                    # Check if the result is a deferred callable
+                    if callable(task_result):
+                        # Call the deferred callable with the EngineContext
+                        final_result = await task_result(ctx)
+                        if final_result is None:
+                            # Deferred callable decided not to return data
+                            return EngineHookResult.CALL_NEXT
+                        task_result = final_result
+
+                    # Handle None result
+                    if task_result is None:
+                        return EngineHookResult.CALL_NEXT
+
+                    # task_result must be a RetrieverResult at this point
+                    retriever_result = task_result
 
                     if not (
                         retriever_result.data
@@ -2680,6 +2903,7 @@ class Server:
         max_engine_iterations: int | None = None,
         tags: Sequence[TagId] = [],
         id: str | None = None,
+        perceived_performance_policy: PerceivedPerformancePolicy | None = None,
     ) -> Agent:
         """Creates a new agent with the specified name, description, and composition mode.
 
@@ -2698,6 +2922,8 @@ class Server:
                 automatically generated based on the agent's properties. Custom IDs
                 can be any string format and are useful for maintaining consistent
                 agent identifiers across deployments or integrations.
+            perceived_performance_policy: Optional perceived performance policy for this agent.
+                If not specified, the agent will use the default policy (BasicPerceivedPerformancePolicy).
 
         Returns:
             The created Agent instance.
@@ -2712,6 +2938,11 @@ class Server:
             composition_mode=composition_mode.value,
             id=AgentId(id) if id is not None else None,
         )
+
+        if perceived_performance_policy is not None:
+            self._container[PerceivedPerformancePolicyProvider].set_policy(
+                agent.id, perceived_performance_policy
+            )
 
         return Agent(
             id=agent.id,
@@ -3238,15 +3469,16 @@ __all__ = [
     "CustomerId",
     "CustomerModerationContext",
     "CustomerStore",
+    "DefaultBaseModel",
+    "DeferredRetriever",
     "DevelopmentAuthorizationPolicy",
     "END_JOURNEY",
-    "Variable",
-    "ContextVariableId",
-    "ControlOptions",
     "Embedder",
     "EmbedderFactory",
+    "EmbedderHints",
     "EmbeddingResult",
     "EmittedEvent",
+    "EngineContext",
     "EngineHook",
     "EngineHookResult",
     "EngineHooks",
@@ -3256,6 +3488,7 @@ __all__ = [
     "FallbackSchematicGenerator",
     "Guideline",
     "GuidelineId",
+    "GuidelineMatchingContext",
     "Interaction",
     "InteractionMessage",
     "JSONSerializable",
@@ -3270,6 +3503,9 @@ __all__ = [
     "LogLevel",
     "Logger",
     "MessageEventData",
+    "ModelGeneration",
+    "ModelSize",
+    "ModelType",
     "ModerationCheck",
     "ModerationService",
     "ModerationTag",
@@ -3281,6 +3517,7 @@ __all__ = [
     "Operation",
     "OptimizationPolicy",
     "PerceivedPerformancePolicy",
+    "PerceivedPerformancePolicyProvider",
     "PluginServer",
     "ProductionAuthorizationPolicy",
     "PromptBuilder",
@@ -3293,9 +3530,11 @@ __all__ = [
     "RelationshipId",
     "RelationshipKind",
     "RetrieverContext",
+    "RetrieverFunction",
     "RetrieverResult",
     "SchematicGenerationResult",
     "SchematicGenerator",
+    "SchematicGeneratorHints",
     "Server",
     "ServiceRegistry",
     "Session",
@@ -3320,6 +3559,7 @@ __all__ = [
     "ToolParameterType",
     "ToolResult",
     "Tracer",
+    "Variable",
     "Variable",
     "VoiceOptimizedPerceivedPerformancePolicy",
     "tool",

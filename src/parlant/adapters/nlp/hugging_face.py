@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any
 from typing_extensions import override
 import torch  # type: ignore
-from transformers import AutoModel, AutoTokenizer  # type: ignore
+from typing import cast
+from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizer, PreTrainedModel  # type: ignore
 from huggingface_hub.errors import (  # type: ignore
     InferenceTimeoutError,
     InferenceEndpointError,
@@ -35,8 +36,8 @@ from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.nlp.embedding import BaseEmbedder, EmbeddingResult
 
 
-_TOKENIZER_MODELS: dict[str, AutoTokenizer] = {}
-_AUTO_MODELS: dict[str, AutoModel] = {}
+_TOKENIZER_MODELS: dict[str, PreTrainedTokenizer] = {}
+_AUTO_MODELS: dict[str, PreTrainedModel] = {}
 _DEVICE: torch.device | None = None
 
 
@@ -44,7 +45,7 @@ def _model_temp_dir() -> str:
     return str(Path(gettempdir()) / "parlant_data" / "hf_models")
 
 
-def _create_tokenizer(model_name: str) -> AutoTokenizer:
+def _create_tokenizer(model_name: str) -> PreTrainedTokenizer:
     if model_name in _TOKENIZER_MODELS:
         return _TOKENIZER_MODELS[model_name]
 
@@ -56,7 +57,7 @@ def _create_tokenizer(model_name: str) -> AutoTokenizer:
 
     _TOKENIZER_MODELS[model_name] = tokenizer
 
-    return tokenizer
+    return tokenizer  # type: ignore
 
 
 def _get_device() -> torch.device:
@@ -75,7 +76,7 @@ def _get_device() -> torch.device:
     return _DEVICE
 
 
-def _create_auto_model(model_name: str) -> AutoModel:
+def _create_auto_model(model_name: str) -> PreTrainedModel:
     if model_name in _AUTO_MODELS:
         return _AUTO_MODELS[model_name]
 
@@ -87,6 +88,7 @@ def _create_auto_model(model_name: str) -> AutoModel:
         attn_implementation="eager",
         trust_remote_code=True
     ).to(_get_device())
+    model = cast(PreTrainedModel, model)
 
     model.save_pretrained(save_dir)
     model.eval()
@@ -103,7 +105,8 @@ class HuggingFaceEstimatingTokenizer(EstimatingTokenizer):
 
     @override
     async def estimate_token_count(self, prompt: str) -> int:
-        tokens = self._tokenizer.tokenize(prompt)
+        # Use encode to get token ids, which is always available
+        tokens = self._tokenizer.encode(prompt)
         return len(tokens)
 
 

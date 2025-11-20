@@ -15,6 +15,7 @@
 from collections import defaultdict
 from fastapi import APIRouter, Path, Query, Request, status
 from fastapi.responses import PlainTextResponse
+from html import escape
 from pydantic import Field
 from typing import Annotated, Sequence, TypeAlias, cast
 
@@ -36,6 +37,7 @@ from parlant.core.journeys import (
 )
 from parlant.core.guidelines import GuidelineId
 from parlant.core.tags import TagId
+import re
 
 API_GROUP = "journeys"
 
@@ -302,6 +304,20 @@ async def _build_mermaid_chart(
     transitions: list[str] = []
     style_lines: list[str] = []
 
+    def escape_mermaid(s: str) -> str:
+        def convert_match(match: re.Match[str]) -> str:
+            number = match.group(1)
+            if number.startswith("x"):
+                dec_num = int(number[1:], 16)  # convert hex to decimal
+                return f"#{dec_num};"
+            else:
+                return f"#{number};"  # keep decimal as is
+
+        html_escaped = escape(s, quote=True)
+
+        # apply regex replacement to fix numeric character references for mermaid syntax
+        return re.sub(r"&#(x[0-9a-fA-F]+|[0-9]+);", convert_match, html_escaped)
+
     def declare(nid: JourneyNodeId) -> None:
         if nid == JourneyStore.END_NODE_ID or nid in declared:
             return
@@ -310,7 +326,7 @@ async def _build_mermaid_chart(
             return
         declared.add(nid)
         m = mermaid_id(nid)
-        state_decls.append(f"    {m}: {lbl}")
+        state_decls.append(f'    state "{escape_mermaid(lbl)}" as {m}')
         node = node_by_id.get(nid)
         if node and _is_tool_node(node):
             style_lines.append(f"style {m} {TOOL_STYLE}")
@@ -385,7 +401,7 @@ def create_router(
                 "description": "Journey successfully created. Returns the complete journey object including generated ID.",
                 "content": example_json_content(journey_example),
             },
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in request parameters"
             },
         },
@@ -526,7 +542,7 @@ def create_router(
             status.HTTP_404_NOT_FOUND: {
                 "description": "Journey not found. the specified `journey_id` does not exist"
             },
-            status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "description": "Validation error in update parameters"
             },
         },
