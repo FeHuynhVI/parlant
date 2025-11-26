@@ -31,9 +31,11 @@ from parlant.core.engines.alpha.guideline_matching.guideline_match import (
 from parlant.core.engines.alpha.guideline_matching.guideline_matcher import (
     GuidelineMatchingBatch,
     GuidelineMatchingBatchResult,
-    GuidelineMatchingContext,
     GuidelineMatchingBatchError,
     GuidelineMatchingStrategy,
+)
+from parlant.core.engines.alpha.guideline_matching.guideline_matching_context import (
+    GuidelineMatchingContext,
 )
 from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
 from parlant.core.engines.alpha.prompt_builder import BuiltInSection, PromptBuilder, SectionStatus
@@ -432,6 +434,7 @@ def _make_event(e_id: str, source: EventSource, message: str) -> Event:
         offset=0,
         trace_id="",
         data={"message": message},
+        metadata={},
         deleted=False,
     )
 

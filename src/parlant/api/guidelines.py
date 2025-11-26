@@ -214,7 +214,9 @@ class GuidelineCreationParamsDTO(
     """Parameters for creating a new guideline."""
 
     condition: GuidelineConditionField
+    id: GuidelineIdPath | None = None
     action: GuidelineActionField | None = None
+    description: common.GuidelineDescriptionField | None = None
     metadata: GuidelineMetadataField | None = None
     enabled: GuidelineEnabledField | None = None
     tags: GuidelineTagsField | None = None
@@ -281,6 +283,7 @@ class GuidelineUpdateParamsDTO(
 
     condition: GuidelineConditionField | None = None
     action: GuidelineActionField | None = None
+    description: common.GuidelineDescriptionField | None = None
     tool_associations: GuidelineToolAssociationUpdateParamsDTO | None = None
     enabled: GuidelineEnabledField | None = None
     tags: GuidelineTagsUpdateParamsDTO | None = None
@@ -372,6 +375,7 @@ def _guideline_relationship_to_dto(
             id=rel_source_guideline.id,
             condition=rel_source_guideline.content.condition,
             action=rel_source_guideline.content.action,
+            description=rel_source_guideline.content.description,
             enabled=rel_source_guideline.enabled,
             tags=rel_source_guideline.tags,
             metadata=rel_source_guideline.metadata,
@@ -390,6 +394,7 @@ def _guideline_relationship_to_dto(
             creation_utc=rel_target_guideline.creation_utc,
             condition=rel_target_guideline.content.condition,
             action=rel_target_guideline.content.action,
+            description=rel_target_guideline.content.description,
             enabled=rel_target_guideline.enabled,
             tags=rel_target_guideline.tags,
             metadata=rel_target_guideline.metadata,
@@ -437,22 +442,34 @@ def create_router(
         """
         Creates a new guideline.
 
+        The guideline will be initialized with the provided condition and optional action and settings.
+        A unique identifier will be automatically generated unless a custom ID is provided.
+
         See the [documentation](https://parlant.io/docs/concepts/customization/guidelines) for more information.
         """
         await authorization_policy.authorize(request=request, operation=Operation.CREATE_GUIDELINE)
 
-        guideline = await app.guidelines.create(
-            condition=params.condition,
-            action=params.action or None,
-            metadata=params.metadata or {},
-            enabled=params.enabled or True,
-            tags=params.tags,
-        )
+        try:
+            guideline = await app.guidelines.create(
+                condition=params.condition,
+                action=params.action or None,
+                description=params.description or None,
+                metadata=params.metadata or {},
+                enabled=params.enabled or True,
+                tags=params.tags,
+                id=params.id,
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(e),
+            )
 
         return GuidelineDTO(
             id=guideline.id,
             condition=guideline.content.condition,
             action=guideline.content.action,
+            description=guideline.content.description,
             metadata=guideline.metadata,
             enabled=guideline.enabled,
             tags=guideline.tags,
@@ -490,6 +507,7 @@ def create_router(
                 id=guideline.id,
                 condition=guideline.content.condition,
                 action=guideline.content.action,
+                description=guideline.content.description,
                 metadata=guideline.metadata,
                 enabled=guideline.enabled,
                 tags=guideline.tags,
@@ -544,6 +562,7 @@ def create_router(
                 id=guideline.id,
                 condition=guideline.content.condition,
                 action=guideline.content.action,
+                description=guideline.content.description,
                 metadata=guideline.metadata,
                 enabled=guideline.enabled,
                 tags=guideline.tags,
@@ -606,6 +625,7 @@ def create_router(
             guideline_id=guideline_id,
             condition=params.condition,
             action=params.action,
+            description=params.description,
             tool_associations=GuidelineToolAssociationUpdateParams(
                 add=[
                     ToolId(service_name=t.service_name, tool_name=t.tool_name)
@@ -644,6 +664,7 @@ def create_router(
                 id=updated_guideline.id,
                 condition=updated_guideline.content.condition,
                 action=updated_guideline.content.action,
+                description=updated_guideline.content.description,
                 metadata=updated_guideline.metadata,
                 enabled=updated_guideline.enabled,
                 tags=updated_guideline.tags,

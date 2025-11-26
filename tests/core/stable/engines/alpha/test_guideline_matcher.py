@@ -31,6 +31,9 @@ from parlant.core.context_variables import (
     ContextVariableValue,
     ContextVariableValueId,
 )
+from parlant.core.engines.alpha.guideline_matching.guideline_matching_context import (
+    GuidelineMatchingContext,
+)
 from parlant.core.meter import Meter
 from parlant.core.tracer import Tracer
 from parlant.core.customers import Customer
@@ -47,7 +50,6 @@ from parlant.core.engines.alpha.guideline_matching.guideline_matcher import (
     GuidelineMatcher,
     GuidelineMatchingBatch,
     GuidelineMatchingBatchResult,
-    GuidelineMatchingContext,
     ResponseAnalysisBatch,
     ResponseAnalysisBatchResult,
     ResponseAnalysisContext,
@@ -516,13 +518,16 @@ def create_context_variable(
 ) -> tuple[ContextVariable, ContextVariableValue]:
     return ContextVariable(
         id=ContextVariableId("-"),
+        creation_utc=datetime.now(timezone.utc),
         name=name,
         description="",
         tool_id=None,
         freshness_rules=None,
         tags=tags,
     ), ContextVariableValue(
-        ContextVariableValueId("-"), last_modified=datetime.now(timezone.utc), data=data
+        ContextVariableValueId("-"),
+        last_modified=datetime.now(timezone.utc),
+        data=data,
     )
 
 
@@ -1147,10 +1152,18 @@ async def test_that_guidelines_are_matched_based_on_staged_tool_calls_and_contex
     )
     staged_tool_events = [
         EmittedEvent(
-            source=EventSource.AI_AGENT, kind=EventKind.TOOL, trace_id="", data=tool_result_1
+            source=EventSource.AI_AGENT,
+            kind=EventKind.TOOL,
+            trace_id="",
+            data=tool_result_1,
+            metadata=None,
         ),
         EmittedEvent(
-            source=EventSource.AI_AGENT, kind=EventKind.TOOL, trace_id="", data=tool_result_2
+            source=EventSource.AI_AGENT,
+            kind=EventKind.TOOL,
+            trace_id="",
+            data=tool_result_2,
+            metadata=None,
         ),
     ]
 
@@ -1236,12 +1249,14 @@ async def test_that_guidelines_are_matched_based_on_staged_tool_calls_without_co
             kind=EventKind.TOOL,
             trace_id="",
             data=tool_result_1,
+            metadata=None,
         ),
         EmittedEvent(
             source=EventSource.AI_AGENT,
             kind=EventKind.TOOL,
             trace_id="",
             data=tool_result_2,
+            metadata=None,
         ),
     ]
     conversation_guideline_names: list[str] = ["suggest_drink_underage", "suggest_drink_adult"]
@@ -2072,7 +2087,11 @@ async def test_that_observational_guidelines_are_detected_based_on_tool_results(
     )
     staged_events = [
         EmittedEvent(
-            source=EventSource.AI_AGENT, kind=EventKind.TOOL, trace_id="", data=tool_result
+            source=EventSource.AI_AGENT,
+            kind=EventKind.TOOL,
+            trace_id="",
+            data=tool_result,
+            metadata=None,
         ),
     ]
 

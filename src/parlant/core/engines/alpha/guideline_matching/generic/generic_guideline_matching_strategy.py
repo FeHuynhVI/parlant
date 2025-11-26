@@ -54,8 +54,10 @@ from parlant.core.engines.alpha.guideline_matching.guideline_match import Guidel
 from parlant.core.engines.alpha.guideline_matching.guideline_matcher import (
     GuidelineMatchingBatch,
     GuidelineMatchingStrategy,
-    GuidelineMatchingContext,
     ResponseAnalysisContext,
+)
+from parlant.core.engines.alpha.guideline_matching.guideline_matching_context import (
+    GuidelineMatchingContext,
 )
 from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
 from parlant.core.entity_cq import EntityQueries
@@ -207,6 +209,8 @@ class GenericGuidelineMatchingStrategy(GuidelineMatchingStrategy):
                     *[
                         self._create_batch_journey_step_selection(examined_journey, steps, context)
                         for examined_journey, steps in journey_step_selection_journeys.items()
+                        if len(steps)
+                        > 1  # In case journey has only one (root) step, no need to evaluate
                     ]
                 )
             )

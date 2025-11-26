@@ -396,13 +396,16 @@ def create_context_variable(
 ) -> tuple[ContextVariable, ContextVariableValue]:
     return ContextVariable(
         id=ContextVariableId("-"),
+        creation_utc=datetime.now(timezone.utc),
         name=name,
         description="",
         tool_id=None,
         freshness_rules=None,
         tags=tags,
     ), ContextVariableValue(
-        ContextVariableValueId("-"), last_modified=datetime.now(timezone.utc), data=data
+        ContextVariableValueId("-"),
+        last_modified=datetime.now(timezone.utc),
+        data=data,
     )
 
 
@@ -908,7 +911,11 @@ async def test_that_observational_guidelines_arent_wrongly_implied(
     )
     staged_events = [
         EmittedEvent(
-            source=EventSource.AI_AGENT, kind=EventKind.TOOL, trace_id="", data=tool_result
+            source=EventSource.AI_AGENT,
+            kind=EventKind.TOOL,
+            trace_id="",
+            data=tool_result,
+            metadata=None,
         ),
     ]
 
@@ -966,7 +973,11 @@ async def test_that_observational_guidelines_are_detected_correctly_when_lots_of
     )
     staged_events = [
         EmittedEvent(
-            source=EventSource.AI_AGENT, kind=EventKind.TOOL, trace_id="", data=tool_result
+            source=EventSource.AI_AGENT,
+            kind=EventKind.TOOL,
+            trace_id="",
+            data=tool_result,
+            metadata=None,
         ),
     ]
     conversation_context: list[tuple[EventSource, str]] = [

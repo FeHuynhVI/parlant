@@ -66,6 +66,7 @@ from parlant.core.journey_guideline_projection import (
 )
 from parlant.core.journeys import Journey, JourneyId
 from parlant.core.meter import Meter
+from parlant.core.app_modules.sessions import SessionUpdateParamsModel
 from parlant.core.sessions import (
     AgentState,
     ContextVariable as StoredContextVariable,
@@ -76,7 +77,6 @@ from parlant.core.sessions import (
     PreparationIteration,
     PreparationIterationGenerations,
     Session,
-    SessionUpdateParams,
     Term as StoredTerm,
     ToolEventData,
 )
@@ -180,10 +180,8 @@ class AlphaEngine(Engine):
             return True
 
         try:
-            async with self._hist_engine_process_duration.measure(
-                {"session_id": context.session_id},
-            ):
-                with self._tracer.span("process", {"session_id": context.session_id}):
+            with self._tracer.span("process", {"session_id": context.session_id}):
+                async with self._hist_engine_process_duration.measure():
                     await self._do_process(loaded_context)
             return True
         except asyncio.CancelledError:
@@ -548,6 +546,17 @@ class AlphaEngine(Engine):
             )
 
             matching_finished = True
+
+            # Call on_match handlers for resolved guidelines
+            handler_tasks = [
+                handler(context, match)
+                for match in guideline_and_journey_matching_result.resolved_guidelines
+                if match.guideline.id in self._hooks.guideline_match_handlers
+                for handler in self._hooks.guideline_match_handlers[match.guideline.id]
+            ]
+
+            if handler_tasks:
+                await async_utils.safe_gather(*handler_tasks)
 
             context.state.journeys = guideline_and_journey_matching_result.journeys
         finally:
@@ -1740,7 +1749,7 @@ class AlphaEngine(Engine):
 
         await self._entity_commands.update_session(
             session_id=session.id,
-            params=SessionUpdateParams(
+            params=SessionUpdateParamsModel(
                 agent_states=list(session.agent_states)
                 + [
                     AgentState(

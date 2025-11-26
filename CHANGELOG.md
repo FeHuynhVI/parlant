@@ -25,6 +25,13 @@ All notable changes to Parlant will be documented here.
 - Allow controlling perceived performance policy per agent
 - Expose IoC container in server object
 - Support code-based, custom guideline matchers
+- Added guideline descriptions
+- Add guideline on_match() hooks
+- Allow specifying custom IDs when creating journeys via SDK and API
+- Allow specifying custom IDs when creating guidelines via SDK and API
+- Allow specifying custom IDs when creating glossary via SDK and API
+- Add Qdrant VectorDatabase adapter
+
 
 ## [3.0.3] - 2025-10-23
 

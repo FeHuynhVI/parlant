@@ -98,6 +98,9 @@ from parlant.core.context_variables import (
     ContextVariableId,
     ContextVariableStore,
 )
+from parlant.core.engines.alpha.guideline_matching.generic.common import (
+    format_journey_node_guideline_id,
+)
 from parlant.core.meter import Meter
 from parlant.core.tracer import Tracer
 from parlant.core.customers import (
@@ -119,7 +122,7 @@ from parlant.core.engines.alpha.entity_context import EntityContext
 from parlant.core.engines.alpha.guideline_matching.guideline_match import (
     GuidelineMatch as _GuidelineMatch,
 )
-from parlant.core.engines.alpha.guideline_matching.guideline_matcher import (
+from parlant.core.engines.alpha.guideline_matching.guideline_matching_context import (
     GuidelineMatchingContext as _GuidelineMatchingContext,
 )
 from parlant.core.engines.alpha.guideline_matching.generic_guideline_matching_strategy_resolver import (
@@ -202,6 +205,7 @@ from parlant.core.journeys import (
     JourneyStore,
     JourneyVectorStore,
 )
+
 from parlant.core.loggers import LogLevel, Logger
 from parlant.core.nlp.service import (
     EmbedderHints,
@@ -796,6 +800,9 @@ class Relationship:
 class GuidelineMatch:
     """Result of a custom guideline matcher."""
 
+    id: GuidelineId
+    """The ID of the guideline that was matched."""
+
     matched: bool
     """Whether the guideline matched the current context."""
 
@@ -807,14 +814,14 @@ class GuidelineMatch:
 class GuidelineMatchingContext:
     """Context for custom guideline matchers, providing information about the current interaction."""
 
-    server: "Server"
+    server: Server
     container: Container
     logger: Logger
     tracer: Tracer
-    session: "Session"
-    agent: "Agent"
-    customer: "Customer"
-    variables: Mapping["Variable", JSONSerializable]
+    session: Session
+    agent: Agent
+    customer: Customer
+    variables: Mapping[Variable, JSONSerializable]
     interaction: Interaction
 
     @classmethod
@@ -823,7 +830,7 @@ class GuidelineMatchingContext:
         core_ctx: _GuidelineMatchingContext,
         server: "Server",
         container: Container,
-    ) -> "GuidelineMatchingContext":
+    ) -> GuidelineMatchingContext:
         """Convert a core GuidelineMatchingContext to an SDK GuidelineMatchingContext."""
         agent = await server.get_agent(id=core_ctx.agent.id)
 
@@ -845,9 +852,27 @@ class GuidelineMatchingContext:
 
 async def _match_always(ctx: GuidelineMatchingContext, g: Guideline) -> GuidelineMatch:
     return GuidelineMatch(
+        id=g.id,
         matched=True,
         rationale="Always relevant",
     )
+
+
+@dataclass
+class JourneyStateMatch:
+    """Result of a journey state transition match."""
+
+    state_id: JourneyStateId
+    """The ID of the journey state that was matched."""
+
+    transition_id: JourneyTransitionId
+    """The ID of the journey transition that was matched."""
+
+    matched: bool
+    """Whether the journey state transition matched the current context."""
+
+    rationale: str | None
+    """Explanation of why the state transition matched or didn't match."""
 
 
 @dataclass(frozen=True)
@@ -1043,6 +1068,7 @@ class JourneyState:
         fork: bool = False,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[JourneyState]:
         if not self._journey:
             raise SDKError("EndState cannot be connected to any other states.")
@@ -1095,7 +1121,7 @@ class JourneyState:
             )
 
         transition = await self._journey.create_transition(
-            condition=condition, source=self, target=actual_state or END_JOURNEY
+            condition=condition, source=self, target=actual_state or END_JOURNEY, on_match=on_match
         )
 
         if actual_state:
@@ -1132,6 +1158,7 @@ class InitialJourneyState(JourneyState):
         state: TState,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[TState]: ...
 
     @overload
@@ -1142,6 +1169,7 @@ class InitialJourneyState(JourneyState):
         chat_state: str,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ChatJourneyState]: ...
 
     @overload
@@ -1152,6 +1180,7 @@ class InitialJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: ToolEntry,
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     @overload
@@ -1162,6 +1191,7 @@ class InitialJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: Sequence[ToolEntry],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     async def transition_to(
@@ -1174,6 +1204,7 @@ class InitialJourneyState(JourneyState):
         tool_state: ToolEntry | Sequence[ToolEntry] = [],
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[Any]:
         return await self._transition(
             condition=condition,
@@ -1182,6 +1213,7 @@ class InitialJourneyState(JourneyState):
             tools=[tool_state] if isinstance(tool_state, ToolEntry) else tool_state,
             canned_responses=canned_responses,
             metadata=metadata,
+            on_match=on_match,
         )
 
 
@@ -1196,6 +1228,7 @@ class ToolJourneyState(JourneyState):
         state: TState,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[TState]: ...
 
     @overload
@@ -1206,6 +1239,7 @@ class ToolJourneyState(JourneyState):
         chat_state: str,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ChatJourneyState]: ...
 
     @overload
@@ -1216,6 +1250,7 @@ class ToolJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: ToolEntry,
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     @overload
@@ -1226,6 +1261,7 @@ class ToolJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: Sequence[ToolEntry],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     async def transition_to(
@@ -1238,6 +1274,7 @@ class ToolJourneyState(JourneyState):
         tool_state: ToolEntry | Sequence[ToolEntry] = [],
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[Any]:
         return await self._transition(
             condition=condition,
@@ -1246,6 +1283,7 @@ class ToolJourneyState(JourneyState):
             tools=[tool_state] if isinstance(tool_state, ToolEntry) else tool_state,
             canned_responses=canned_responses,
             metadata=metadata,
+            on_match=on_match,
         )
 
     async def fork(self) -> JourneyTransition[ForkJourneyState]:
@@ -1263,6 +1301,7 @@ class ChatJourneyState(JourneyState):
         state: TState,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[TState]: ...
 
     @overload
@@ -1273,6 +1312,7 @@ class ChatJourneyState(JourneyState):
         chat_state: str,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ChatJourneyState]: ...
 
     @overload
@@ -1283,6 +1323,7 @@ class ChatJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: ToolEntry,
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     @overload
@@ -1293,6 +1334,7 @@ class ChatJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: Sequence[ToolEntry],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     async def transition_to(
@@ -1305,6 +1347,7 @@ class ChatJourneyState(JourneyState):
         tool_state: ToolEntry | Sequence[ToolEntry] = [],
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[Any]:
         return await self._transition(
             condition=condition,
@@ -1313,6 +1356,7 @@ class ChatJourneyState(JourneyState):
             tools=[tool_state] if isinstance(tool_state, ToolEntry) else tool_state,
             canned_responses=canned_responses,
             metadata=metadata,
+            on_match=on_match,
         )
 
     async def fork(self) -> JourneyTransition[ForkJourneyState]:
@@ -1330,6 +1374,7 @@ class ForkJourneyState(JourneyState):
         state: TState,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[TState]: ...
 
     @overload
@@ -1340,6 +1385,7 @@ class ForkJourneyState(JourneyState):
         chat_state: str,
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ChatJourneyState]: ...
 
     @overload
@@ -1350,6 +1396,7 @@ class ForkJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: ToolEntry,
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     @overload
@@ -1360,6 +1407,7 @@ class ForkJourneyState(JourneyState):
         tool_instruction: str | None = None,
         tool_state: Sequence[ToolEntry],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[ToolJourneyState]: ...
 
     async def transition_to(
@@ -1372,6 +1420,7 @@ class ForkJourneyState(JourneyState):
         tool_state: ToolEntry | Sequence[ToolEntry] = [],
         canned_responses: Sequence[CannedResponseId] = [],
         metadata: Mapping[str, JSONSerializable] = {},
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[Any]:
         return await self._transition(
             condition=condition,
@@ -1380,6 +1429,7 @@ class ForkJourneyState(JourneyState):
             tools=[tool_state] if isinstance(tool_state, ToolEntry) else tool_state,
             canned_responses=canned_responses,
             metadata=metadata,
+            on_match=on_match,
         )
 
 
@@ -1460,6 +1510,7 @@ class Journey:
         condition: str | None,
         source: JourneyState,
         target: TState,
+        on_match: Callable[[EngineContext, JourneyStateMatch], Awaitable[None]] | None = None,
     ) -> JourneyTransition[TState]:
         """Creates a transition between two states in the journey."""
 
@@ -1486,6 +1537,30 @@ class Journey:
             condition=condition,
         )
 
+        # Register on_match handler if provided
+        if on_match is not None and target is not None and target.id != END_JOURNEY.id:
+            # Compute the guideline ID for this journey edge
+            guideline_id = format_journey_node_guideline_id(target.id, transition.id)
+
+            # Create shim handler that translates core types to SDK types
+            async def shim_handler(
+                core_ctx: EngineContext,
+                core_match: _GuidelineMatch,
+            ) -> None:
+                # Build SDK journey state match
+                sdk_match = JourneyStateMatch(
+                    state_id=target.id,
+                    matched=True,
+                    rationale=core_match.rationale,
+                    transition_id=transition.id,
+                )
+
+                await on_match(core_ctx, sdk_match)
+
+            # Register handler with engine hooks
+            engine_hooks = self._container[EngineHooks]
+            engine_hooks.guideline_match_handlers[guideline_id].append(shim_handler)
+
         return JourneyTransition[TState](
             id=transition.id,
             condition=condition,
@@ -1498,110 +1573,45 @@ class Journey:
         self,
         condition: str,
         action: str | None = None,
+        description: str | None = None,
         tools: Iterable[ToolEntry] = [],
         metadata: dict[str, JSONSerializable] = {},
         canned_responses: Sequence[CannedResponseId] = [],
         matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
+        on_match: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
+        id: GuidelineId | None = None,
     ) -> Guideline:
         """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
-
-        self._server._advance_creation_progress()
-
-        tool_ids = [
-            ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name) for t in tools
-        ]
-
-        for t in list(tools):
-            await self._server._plugin_server.enable_tool(t)
-
-        guideline = await self._container[GuidelineStore].create_guideline(
+        return await self._server._create_guideline(
             condition=condition,
             action=action,
+            description=description,
+            tools=tools,
             metadata=metadata,
+            canned_responses=canned_responses,
+            matcher=matcher,
+            on_match=on_match,
+            tags=None,
+            relationship_target_tag_id=_Tag.for_journey_id(self.id),
+            id=id,
         )
-
-        if canned_responses:
-            tag_id = _Tag.for_guideline_id(guideline.id)
-            for id in canned_responses:
-                await self._container[CannedResponseStore].upsert_tag(
-                    canned_response_id=id,
-                    tag_id=tag_id,
-                )
-
-        if matcher is None:
-            self._server._add_guideline_evaluation(
-                guideline.id,
-                GuidelineContent(condition=condition, action=action),
-                tool_ids,
-            )
-
-        await self._container[RelationshipStore].create_relationship(
-            source=RelationshipEntity(
-                id=guideline.id,
-                kind=RelationshipEntityKind.GUIDELINE,
-            ),
-            target=RelationshipEntity(
-                id=_Tag.for_journey_id(self.id),
-                kind=RelationshipEntityKind.TAG,
-            ),
-            kind=RelationshipKind.DEPENDENCY,
-        )
-
-        for t in list(tools):
-            await self._container[GuidelineToolAssociationStore].create_association(
-                guideline_id=guideline.id,
-                tool_id=ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name),
-            )
-
-        result_guideline = Guideline(
-            id=guideline.id,
-            condition=condition,
-            action=action,
-            tags=guideline.tags,
-            metadata=guideline.metadata,
-            _server=self._server,
-            _container=self._container,
-        )
-
-        if matcher is not None:
-            # Create a shim that translates between SDK and core types
-            async def shim_matcher(
-                core_ctx: _GuidelineMatchingContext, core_guideline: _Guideline
-            ) -> _GuidelineMatch:
-                sdk_ctx = await GuidelineMatchingContext._from_core(
-                    core_ctx=core_ctx,
-                    server=self._server,
-                    container=self._container,
-                )
-                result = await matcher(sdk_ctx, result_guideline)
-
-                return _GuidelineMatch(
-                    guideline=core_guideline,
-                    score=10 if result.matched else 1,
-                    rationale=result.rationale,
-                )
-
-            strategy = CustomGuidelineMatchingStrategy(
-                guideline=guideline,
-                matcher=shim_matcher,
-                logger=self._container[Logger],
-            )
-
-            self._container[GenericGuidelineMatchingStrategyResolver].guideline_overrides[
-                guideline.id
-            ] = strategy
-
-        return result_guideline
 
     async def create_observation(
         self,
         condition: str,
+        description: str | None = None,
         canned_responses: Sequence[CannedResponseId] = [],
+        on_match: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
     ) -> Guideline:
         """A shorthand for creating an observational guideline with the specified condition."""
 
-        return await self.create_guideline(condition=condition, canned_responses=canned_responses)
+        return await self.create_guideline(
+            condition=condition,
+            description=description,
+            canned_responses=canned_responses,
+            on_match=on_match,
+        )
 
     async def attach_tool(
         self,
@@ -1984,12 +1994,13 @@ class Agent:
         title: str,
         description: str,
         conditions: list[str | Guideline],
+        id: JourneyId | None = None,
     ) -> Journey:
         """Creates a new journey with the specified title, description, and conditions."""
 
         self._server._advance_creation_progress()
 
-        journey = await self._server.create_journey(title, description, conditions)
+        journey = await self._server.create_journey(title, description, conditions, id=id)
 
         await self.attach_journey(journey)
 
@@ -2018,98 +2029,45 @@ class Agent:
         self,
         condition: str,
         action: str | None = None,
+        description: str | None = None,
         tools: Iterable[ToolEntry] = [],
         metadata: dict[str, JSONSerializable] = {},
         canned_responses: Sequence[CannedResponseId] = [],
         matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
+        on_match: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
+        id: GuidelineId | None = None,
     ) -> Guideline:
         """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
-        self._server._advance_creation_progress()
-
-        tool_ids = [
-            ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name) for t in tools
-        ]
-
-        for t in list(tools):
-            await self._server._plugin_server.enable_tool(t)
-
-        guideline = await self._container[GuidelineStore].create_guideline(
+        return await self._server._create_guideline(
             condition=condition,
             action=action,
-            tags=[_Tag.for_agent_id(self.id)],
+            description=description,
+            tools=tools,
             metadata=metadata,
+            canned_responses=canned_responses,
+            matcher=matcher,
+            on_match=on_match,
+            tags=[_Tag.for_agent_id(self.id)],
+            relationship_target_tag_id=None,
+            id=id,
         )
-
-        if canned_responses:
-            tag_id = _Tag.for_guideline_id(guideline.id)
-            for id in canned_responses:
-                await self._container[CannedResponseStore].upsert_tag(
-                    canned_response_id=id,
-                    tag_id=tag_id,
-                )
-
-        if matcher is None:
-            self._server._add_guideline_evaluation(
-                guideline.id,
-                GuidelineContent(condition=condition, action=action),
-                tool_ids,
-            )
-
-        for t in list(tools):
-            await self._container[GuidelineToolAssociationStore].create_association(
-                guideline_id=guideline.id,
-                tool_id=ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name),
-            )
-
-        result_guideline = Guideline(
-            id=guideline.id,
-            condition=condition,
-            action=action,
-            tags=guideline.tags,
-            metadata=guideline.metadata,
-            _server=self._server,
-            _container=self._container,
-        )
-
-        if matcher is not None:
-            # Create a shim that translates between SDK and core types
-            async def shim_matcher(
-                core_ctx: _GuidelineMatchingContext, core_guideline: _Guideline
-            ) -> _GuidelineMatch:
-                sdk_ctx = await GuidelineMatchingContext._from_core(
-                    core_ctx=core_ctx,
-                    server=self._server,
-                    container=self._container,
-                )
-                result = await matcher(sdk_ctx, result_guideline)
-
-                return _GuidelineMatch(
-                    guideline=core_guideline,
-                    score=10 if result.matched else 1,
-                    rationale=result.rationale,
-                )
-
-            strategy = CustomGuidelineMatchingStrategy(
-                guideline=guideline,
-                matcher=shim_matcher,
-                logger=self._container[Logger],
-            )
-
-            self._container[GenericGuidelineMatchingStrategyResolver].guideline_overrides[
-                guideline.id
-            ] = strategy
-
-        return result_guideline
 
     async def create_observation(
         self,
         condition: str,
+        description: str | None = None,
         canned_responses: Sequence[CannedResponseId] = [],
+        on_match: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
     ) -> Guideline:
         """A shorthand for creating an observational guideline with the specified condition."""
 
-        return await self.create_guideline(condition=condition, canned_responses=canned_responses)
+        return await self.create_guideline(
+            condition=condition,
+            description=description,
+            canned_responses=canned_responses,
+            on_match=on_match,
+        )
 
     async def attach_tool(
         self,
@@ -2162,6 +2120,7 @@ class Agent:
         name: str,
         description: str,
         synonyms: Sequence[str] = [],
+        id: Optional[TermId] = None,
     ) -> Term:
         """Creates a glossary term with the specified name, description, and synonyms."""
 
@@ -2172,6 +2131,7 @@ class Agent:
             description=description,
             synonyms=synonyms,
             tags=[_Tag.for_agent_id(self.id)],
+            id=id,
         )
 
         return Term(
@@ -2541,6 +2501,131 @@ class Server:
         journey: Journey,
     ) -> None:
         self._journey_evaluations[journey.id] = ((journey,), self._evaluator.evaluate_journey)
+
+    async def _create_guideline(
+        self,
+        condition: str,
+        action: str | None,
+        description: str | None,
+        tools: Iterable[ToolEntry],
+        metadata: dict[str, JSONSerializable],
+        canned_responses: Sequence[CannedResponseId],
+        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]] | None,
+        on_match: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None,
+        tags: Sequence[TagId] | None,
+        relationship_target_tag_id: TagId | None,
+        id: GuidelineId | None = None,
+    ) -> Guideline:
+        """Internal method to create a guideline with common logic."""
+        self._advance_creation_progress()
+
+        tool_ids = [
+            ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name) for t in tools
+        ]
+
+        for t in list(tools):
+            await self._plugin_server.enable_tool(t)
+
+        guideline = await self.container[GuidelineStore].create_guideline(
+            condition=condition,
+            action=action,
+            description=description,
+            metadata=metadata,
+            id=id,
+        )
+
+        if canned_responses:
+            tag_id = _Tag.for_guideline_id(guideline.id)
+
+            for canrep_id in canned_responses:
+                await self.container[CannedResponseStore].upsert_tag(
+                    canned_response_id=canrep_id,
+                    tag_id=tag_id,
+                )
+
+        # Evaluate what matcher to use if custom matcher isn't specified
+        if matcher is None:
+            self._add_guideline_evaluation(
+                guideline.id,
+                GuidelineContent(condition=condition, action=action),
+                tool_ids,
+            )
+
+        # Create relationship if target tag specified
+        if relationship_target_tag_id is not None:
+            await self.container[RelationshipStore].create_relationship(
+                source=RelationshipEntity(
+                    id=guideline.id,
+                    kind=RelationshipEntityKind.GUIDELINE,
+                ),
+                target=RelationshipEntity(
+                    id=relationship_target_tag_id,
+                    kind=RelationshipEntityKind.TAG,
+                ),
+                kind=RelationshipKind.DEPENDENCY,
+            )
+
+        for t in list(tools):
+            await self.container[GuidelineToolAssociationStore].create_association(
+                guideline_id=guideline.id,
+                tool_id=ToolId(service_name=INTEGRATED_TOOL_SERVICE_NAME, tool_name=t.tool.name),
+            )
+
+        result_guideline = Guideline(
+            id=guideline.id,
+            condition=condition,
+            action=action,
+            tags=guideline.tags,
+            metadata=guideline.metadata,
+            _server=self,
+            _container=self.container,
+        )
+
+        if matcher is not None:
+            # Create a shim that translates between SDK and core types
+            async def shim_matcher(
+                core_ctx: _GuidelineMatchingContext, core_guideline: _Guideline
+            ) -> _GuidelineMatch:
+                sdk_ctx = await GuidelineMatchingContext._from_core(
+                    core_ctx=core_ctx,
+                    server=self,
+                    container=self.container,
+                )
+                result = await matcher(sdk_ctx, result_guideline)
+
+                return _GuidelineMatch(
+                    guideline=core_guideline,
+                    score=10 if result.matched else 1,
+                    rationale=result.rationale,
+                )
+
+            strategy = CustomGuidelineMatchingStrategy(
+                guideline=guideline,
+                matcher=shim_matcher,
+                logger=self.container[Logger],
+            )
+
+            self.container[GenericGuidelineMatchingStrategyResolver].guideline_overrides[
+                guideline.id
+            ] = strategy
+
+        if on_match is not None:
+            # Create a shim that translates between SDK and core types
+            async def shim_handler(
+                core_ctx: EngineContext,
+                core_match: _GuidelineMatch,
+            ) -> None:
+                sdk_match = GuidelineMatch(
+                    id=core_match.guideline.id,
+                    matched=True,
+                    rationale=core_match.rationale,
+                )
+                await on_match(core_ctx, sdk_match)
+
+            engine_hooks = self.container[EngineHooks]
+            engine_hooks.guideline_match_handlers[guideline.id].append(shim_handler)
+
+        return result_guideline
 
     async def _render_guideline(self, guideline_id: GuidelineId) -> str:
         guideline = await self._container[GuidelineStore].read_guideline(guideline_id)
@@ -3112,6 +3197,7 @@ class Server:
         description: str,
         conditions: list[str | Guideline],
         tags: Sequence[TagId] = [],
+        id: JourneyId | None = None,
     ) -> Journey:
         """Creates a new journey with the specified title, description, and conditions."""
 
@@ -3149,6 +3235,7 @@ class Server:
             description=description,
             conditions=[c.id for c in condition_guidelines],
             tags=[],
+            id=id,
         )
 
         journey = Journey(
@@ -3496,6 +3583,7 @@ __all__ = [
     "JourneyId",
     "JourneyState",
     "JourneyStateId",
+    "JourneyStateMatch",
     "JourneyTransition",
     "JourneyTransitionId",
     "Lifespan",

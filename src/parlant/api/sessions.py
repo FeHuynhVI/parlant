@@ -30,7 +30,12 @@ from parlant.api.common import (
 )
 from parlant.api.glossary import TermSynonymsField, TermIdPath, TermNameField, TermDescriptionField
 from parlant.core.app_modules.common import decode_cursor, encode_cursor
-from parlant.core.app_modules.sessions import Moderation
+from parlant.core.app_modules.sessions import (
+    EventMetadataUpdateParamsModel,
+    EventUpdateParamsModel,
+    Moderation,
+    SessionUpdateParamsModel,
+)
 from parlant.core.agents import AgentId
 from parlant.core.application import Application
 from parlant.core.async_utils import Timeout
@@ -48,7 +53,6 @@ from parlant.core.sessions import (
     PreparationIteration,
     SessionId,
     SessionStatus,
-    SessionUpdateParams,
 )
 from parlant.core.canned_responses import CannedResponseId
 
@@ -322,6 +326,15 @@ class ParticipantDTO(DefaultBaseModel):
     display_name: ParticipantDisplayNameField
 
 
+EventMetadataField: TypeAlias = Annotated[
+    Mapping[str, JSONSerializableDTO],
+    Field(
+        description="Metadata associated with the event",
+        examples=[{"key1": "value1", "key2": 2}],
+    ),
+]
+
+
 class EventCreationParamsDTO(
     DefaultBaseModel,
     json_schema_extra={"example": event_creation_params_example},
@@ -332,6 +345,7 @@ class EventCreationParamsDTO(
     source: EventSourceDTO
     message: SessionEventCreationParamsMessageField | None = None
     data: JSONSerializableDTO | None = None
+    metadata: EventMetadataField | None = None
     guidelines: list[AgentMessageGuidelineDTO] | None = None
     participant: ParticipantDTO | None = None
     status: SessionStatusDTO | None = None
@@ -366,6 +380,7 @@ EventCorrelationIdField: TypeAlias = Annotated[
         examples=["corr_13xyz"],
     ),
 ]
+
 
 EventTraceIdField: TypeAlias = Annotated[
     str,
@@ -403,6 +418,7 @@ class EventDTO(
     trace_id: EventTraceIdField
     correlation_id: EventCorrelationIdField
     data: JSONSerializableDTO
+    metadata: EventMetadataField
     deleted: bool
 
 
@@ -440,6 +456,31 @@ class SessionMetadataUpdateParamsDTO(
 
     set: SessionMetadataField | None = None
     unset: SessionMetadataUnsetField | None = None
+
+
+event_update_params_example: ExampleJson = {
+    "metadata": {
+        "set": {
+            "priority": "high",
+            "category": "support",
+            "agent_id": "agent_123",
+        },
+        "unset": ["old_priority"],
+    }
+}
+
+
+class EventUpdateParamsDTO(
+    DefaultBaseModel,
+    json_schema_extra={"example": event_update_params_example},
+):
+    """Parameters for updating an event.
+
+    Currently only supports updating metadata, but designed to be extensible
+    for future event property updates.
+    """
+
+    metadata: SessionMetadataUpdateParamsDTO | None = None
 
 
 session_update_params_example: ExampleJson = {
@@ -1061,6 +1102,7 @@ def event_to_dto(event: Event) -> EventDTO:
         trace_id=event.trace_id,
         correlation_id=event.trace_id,
         data=cast(JSONSerializableDTO, event.data),
+        metadata=event.metadata,
         deleted=event.deleted,
     )
 
@@ -1593,8 +1635,8 @@ def create_router(
         Only provided attributes will be updated; others remain unchanged."""
         await authorization_policy.authorize(request=request, operation=Operation.UPDATE_SESSION)
 
-        async def from_dto(dto: SessionUpdateParamsDTO) -> SessionUpdateParams:
-            params: SessionUpdateParams = {}
+        async def from_dto(dto: SessionUpdateParamsDTO) -> SessionUpdateParamsModel:
+            params: SessionUpdateParamsModel = {}
 
             if dto.consumption_offsets:
                 session = await app.sessions.read(session_id)
@@ -1757,6 +1799,7 @@ def create_router(
             session_id=session_id,
             status=status_dto_to_status(params.status),
             data=raw_data,
+            metadata=params.metadata,
             source=_event_source_dto_to_event_source(params.source),
         )
 
@@ -1777,6 +1820,7 @@ def create_router(
             session_id=session_id,
             moderation=_moderation_dto_to_moderation(moderation),
             message=params.message,
+            metadata=params.metadata,
             source=EventSource.CUSTOMER,
             trigger_processing=True,
         )
@@ -1822,6 +1866,7 @@ def create_router(
             session_id=session_id,
             message=params.message,
             participant=_participant_dto_to_participant(params.participant),
+            metadata=params.metadata,
         )
 
         return event_to_dto(event)
@@ -1839,6 +1884,7 @@ def create_router(
         event = await app.sessions.create_human_agent_on_behalf_of_ai_agent_message_event(
             session_id=session_id,
             message=params.message,
+            metadata=params.metadata,
         )
 
         return EventDTO(
@@ -1850,6 +1896,7 @@ def create_router(
             trace_id=event.trace_id,
             correlation_id=event.trace_id,
             data=cast(JSONSerializableDTO, event.data),
+            metadata=event.metadata,
             deleted=event.deleted,
         )
 
@@ -1867,6 +1914,7 @@ def create_router(
             session_id=session_id,
             kind=_event_kind_dto_to_event_kind(params.kind),
             data=params.data,
+            metadata=params.metadata,
             source=_event_source_dto_to_event_source(params.source),
             trigger_processing=False,
         )
@@ -1880,6 +1928,7 @@ def create_router(
             trace_id=event.trace_id,
             correlation_id=event.trace_id,
             data=cast(JSONSerializableDTO, event.data),
+            metadata=event.metadata,
             deleted=event.deleted,
         )
 
@@ -1971,6 +2020,7 @@ def create_router(
                 trace_id=e.trace_id,
                 correlation_id=e.trace_id,
                 data=cast(JSONSerializableDTO, e.data),
+                metadata=e.metadata,
                 deleted=e.deleted,
             )
             for e in events
@@ -2003,5 +2053,53 @@ def create_router(
             await app.sessions.delete_events(session_id=session_id, min_offset=min_offset)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"{e}")
+
+    @router.patch(
+        "/{session_id}/events/{event_id}",
+        operation_id="update_event",
+        response_model=EventDTO,
+        responses={
+            status.HTTP_200_OK: {
+                "description": "Event successfully updated",
+                "content": {"application/json": {"example": event_example}},
+            },
+            status.HTTP_404_NOT_FOUND: {"description": "Session or event not found"},
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
+                "description": "Validation error in update parameters"
+            },
+        },
+        **apigen_config(group_name=API_GROUP, method_name="update_event"),
+    )
+    async def update_event(
+        request: Request,
+        session_id: SessionIdPath,
+        event_id: EventIdPath,
+        params: EventUpdateParamsDTO,
+    ) -> EventDTO:
+        """Updates an event's properties.
+
+        Currently only supports updating metadata. Other event properties cannot be modified.
+        This API is designed to be extensible for future event property updates.
+        """
+        await authorization_policy.authorize(request=request, operation=Operation.UPDATE_EVENT)
+
+        update_params: EventUpdateParamsModel = {}
+        if params.metadata is not None:
+            # Convert API DTO to app_modules model - pass through set/unset operations
+            metadata_update: EventMetadataUpdateParamsModel = {}
+            if params.metadata.set:
+                metadata_update["set"] = params.metadata.set
+            if params.metadata.unset:
+                metadata_update["unset"] = params.metadata.unset
+
+            update_params["metadata"] = metadata_update
+
+        event = await app.sessions.update_event(
+            session_id=session_id,
+            event_id=event_id,
+            params=update_params,
+        )
+
+        return event_to_dto(event)
 
     return router

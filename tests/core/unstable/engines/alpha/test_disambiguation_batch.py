@@ -34,7 +34,7 @@ from parlant.core.engines.alpha.guideline_matching.generic.disambiguation_batch 
     DisambiguationGuidelineMatchesSchema,
     GenericDisambiguationGuidelineMatchingBatch,
 )
-from parlant.core.engines.alpha.guideline_matching.guideline_matcher import (
+from parlant.core.engines.alpha.guideline_matching.guideline_matching_context import (
     GuidelineMatchingContext,
 )
 from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
@@ -189,13 +189,16 @@ def create_context_variable(
 ) -> tuple[ContextVariable, ContextVariableValue]:
     return ContextVariable(
         id=ContextVariableId("-"),
+        creation_utc=datetime.now(timezone.utc),
         name=name,
         description="",
         tool_id=None,
         freshness_rules=None,
         tags=tags,
     ), ContextVariableValue(
-        ContextVariableValueId("-"), last_modified=datetime.now(timezone.utc), data=data
+        id=ContextVariableValueId("-"),
+        last_modified=datetime.now(timezone.utc),
+        data=data,
     )
 
 

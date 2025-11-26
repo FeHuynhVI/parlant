@@ -748,3 +748,195 @@ class Test_that_metadata_can_be_set_to_a_journey_state(SDKTest):
             state.metadata.get("internal_action")
             == "Provide detailed information about our services"
         )
+
+
+class Test_that_journey_can_have_a_scoped_guideline(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Dummy Agent",
+            description="Dummy agent",
+        )
+
+        self.journey = await self.agent.create_journey(
+            title="Order Something",
+            conditions=["The customer wants to order something"],
+            description="Help the customer place an order",
+        )
+
+        await self.journey.initial_state.transition_to(
+            chat_state="greet the customer",
+        )
+
+        self.guideline = await self.journey.create_guideline(
+            condition="The customer wants to order a banana",
+            action="Ask them if they'd like green or yellow bananas",
+        )
+
+    async def run(self, ctx: Context) -> None:
+        response = await ctx.send_and_receive(
+            "Can I order a banana?",
+            recipient=self.agent,
+        )
+
+        assert "green" in response.lower()
+
+
+class Test_that_journey_can_be_created_with_custom_id(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        from parlant.core.journeys import JourneyId
+
+        self.agent = await server.create_agent(
+            name="Custom ID Agent",
+            description="Agent for testing custom journey IDs",
+        )
+
+        self.custom_id = JourneyId("custom-journey-123")
+
+        self.journey = await self.agent.create_journey(
+            title="Custom ID Journey",
+            conditions=["Customer needs help"],
+            description="Journey with custom ID",
+            id=self.custom_id,
+        )
+
+    async def run(self, ctx: Context) -> None:
+        journey_store = ctx.container[JourneyStore]
+
+        journey = await journey_store.read_journey(journey_id=self.custom_id)
+
+        assert journey.id == self.custom_id
+        assert journey.title == "Custom ID Journey"
+        assert journey.description == "Journey with custom ID"
+
+
+class Test_that_journey_creation_fails_with_duplicate_id(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        from parlant.core.journeys import JourneyId
+
+        self.agent = await server.create_agent(
+            name="Duplicate ID Agent",
+            description="Agent for testing duplicate journey IDs",
+        )
+
+        self.duplicate_id = JourneyId("duplicate-journey-456")
+
+        # Create the first journey
+        self.first_journey = await self.agent.create_journey(
+            title="First Journey",
+            conditions=["First condition"],
+            description="First journey with duplicate ID",
+            id=self.duplicate_id,
+        )
+
+    async def run(self, ctx: Context) -> None:
+        # Attempt to create a second journey with the same ID should fail
+        with pytest.raises(
+            ValueError, match="Journey with id 'duplicate-journey-456' already exists"
+        ):
+            await self.agent.create_journey(
+                title="Second Journey",
+                conditions=["Second condition"],
+                description="Second journey with duplicate ID",
+                id=self.duplicate_id,
+            )
+
+
+class Test_that_end_journey_match_handlers_are_called(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Journey Exit Handler Agent",
+            description="Tests specific END_JOURNEY transition handlers",
+        )
+
+        self.journey = await self.agent.create_journey(
+            title="Order Process",
+            description="Order processing journey",
+            conditions=["Customer wants to place an order"],
+        )
+
+        # Track which exit handler was called
+        self.success_exit_called = False
+        self.cancel_exit_called = False
+
+        async def success_exit_handler(ctx: p.EngineContext, match: p.JourneyStateMatch) -> None:
+            assert match.state_id == "end", "Should be exiting to END_JOURNEY"
+            self.success_exit_called = True
+
+        async def cancel_exit_handler(ctx: p.EngineContext, match: p.JourneyStateMatch) -> None:
+            assert match.state_id == "end", "Should be exiting to END_JOURNEY"
+            self.cancel_exit_called = True
+
+        # Create a chat state for order confirmation
+        confirmation_state = await self.journey.initial_state.transition_to(
+            chat_state="Please confirm your order or cancel",
+        )
+
+        # Exit path 1: Customer confirms order (success path)
+        await confirmation_state.target.transition_to(
+            condition="Customer confirms the order",
+            state=p.END_JOURNEY,
+            on_match=success_exit_handler,
+        )
+
+        # Exit path 2: Customer cancels order (cancel path)
+        await confirmation_state.target.transition_to(
+            condition="Customer wants to cancel",
+            state=p.END_JOURNEY,
+            on_match=cancel_exit_handler,
+        )
+
+    async def run(self, ctx: Context) -> None:
+        # Start the journey
+        await ctx.send_and_receive(
+            customer_message="I want to place an order",
+            recipient=self.agent,
+        )
+
+        # Trigger the success exit path
+        await ctx.send_and_receive(
+            customer_message="Yes, please confirm my order",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+
+        # Verify only the success exit handler was called
+        assert self.success_exit_called, "Success exit handler should have been called"
+        assert not self.cancel_exit_called, "Cancel exit handler should NOT have been called"
+
+
+class Test_that_journey_state_match_handler_is_called(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.handler_called = False
+        self.captured_state_id = None
+
+        async def state_match_handler(ctx: p.EngineContext, match: p.JourneyStateMatch) -> None:
+            self.handler_called = True
+            self.captured_state_id = match.state_id
+
+        self.agent = await server.create_agent(
+            name="Order Agent",
+            description="Agent for testing journey state match handlers",
+        )
+
+        self.journey = await self.agent.create_journey(
+            title="Order Something",
+            description="Journey to handle orders",
+            conditions=["Customer wants to order something"],
+        )
+
+        self.state = await self.journey.initial_state.transition_to(
+            condition="Customer confirmed order",
+            chat_state="Great! Your order is confirmed.",
+            on_match=state_match_handler,
+        )
+
+    async def run(self, ctx: Context) -> None:
+        await ctx.send_and_receive(
+            customer_message="I want to order something. Yes, confirmed!",
+            recipient=self.agent,
+        )
+
+        assert self.handler_called, "State match handler should have been called"
+        assert self.captured_state_id == self.state.target.id, (
+            f"Expected state ID {self.state.target.id}, got {self.captured_state_id}"
+        )

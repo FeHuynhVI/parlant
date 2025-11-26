@@ -15,7 +15,7 @@
 from typing import Mapping, NewType, Optional, Sequence, cast
 from typing_extensions import override, TypedDict, Self
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from parlant.core.async_utils import ReaderWriterLock
@@ -46,6 +46,7 @@ GuidelineId = NewType("GuidelineId", str)
 class GuidelineContent:
     condition: str
     action: Optional[str]
+    description: Optional[str] = field(default=None)
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class Guideline:
 class GuidelineUpdateParams(TypedDict, total=False):
     condition: str
     action: Optional[str]
+    description: Optional[str]
     enabled: bool
     metadata: Mapping[str, JSONSerializable]
 
@@ -87,10 +89,12 @@ class GuidelineStore(ABC):
         self,
         condition: str,
         action: Optional[str] = None,
+        description: Optional[str] = None,
         metadata: Mapping[str, JSONSerializable] = {},
         creation_utc: Optional[datetime] = None,
         enabled: bool = True,
         tags: Optional[Sequence[TagId]] = None,
+        id: Optional[GuidelineId] = None,
     ) -> Guideline: ...
 
     @abstractmethod
@@ -189,6 +193,7 @@ class GuidelineDocument(TypedDict, total=False):
     creation_utc: str
     condition: str
     action: Optional[str]
+    description: Optional[str]
     enabled: bool
     metadata: Mapping[str, JSONSerializable]
 
@@ -215,7 +220,7 @@ async def guideline_document_converter_0_1_0_to_0_2_0(doc: BaseDocument) -> Opti
 
 
 class GuidelineDocumentStore(GuidelineStore):
-    VERSION = Version.from_string("0.4.0")
+    VERSION = Version.from_string("0.5.0")
 
     def __init__(
         self,
@@ -233,6 +238,19 @@ class GuidelineDocumentStore(GuidelineStore):
         self._lock = ReaderWriterLock()
 
     async def _document_loader(self, doc: BaseDocument) -> Optional[GuidelineDocument]:
+        async def v0_4_0_to_v0_5_0(doc: BaseDocument) -> Optional[BaseDocument]:
+            d = cast(GuidelineDocument, doc)
+            return GuidelineDocument(
+                id=d["id"],
+                version=Version.String("0.5.0"),
+                creation_utc=d["creation_utc"],
+                condition=d["condition"],
+                action=d["action"],
+                description=d.get("description", None),
+                enabled=d["enabled"],
+                metadata=d["metadata"],
+            )
+
         async def v0_3_0_to_v0_4_0(doc: BaseDocument) -> Optional[BaseDocument]:
             d = cast(GuidelineDocument_v0_3_0, doc)
             return GuidelineDocument(
@@ -256,6 +274,7 @@ class GuidelineDocumentStore(GuidelineStore):
                 "0.1.0": guideline_document_converter_0_1_0_to_0_2_0,
                 "0.2.0": v0_2_0_to_v0_3_0,
                 "0.3.0": v0_3_0_to_v0_4_0,
+                "0.4.0": v0_4_0_to_v0_5_0,
             },
         ).migrate(doc)
 
@@ -266,13 +285,23 @@ class GuidelineDocumentStore(GuidelineStore):
             d = cast(GuidelineTagAssociationDocument, doc)
             return GuidelineTagAssociationDocument(
                 id=d["id"],
-                version=Version.String("0.4.0"),
+                version=Version.String("0.5.0"),
                 creation_utc=d["creation_utc"],
                 guideline_id=d["guideline_id"],
                 tag_id=d["tag_id"],
             )
 
         if doc["version"] == "0.4.0":
+            d = cast(GuidelineTagAssociationDocument, doc)
+            return GuidelineTagAssociationDocument(
+                id=d["id"],
+                version=Version.String("0.5.0"),
+                creation_utc=d["creation_utc"],
+                guideline_id=d["guideline_id"],
+                tag_id=d["tag_id"],
+            )
+
+        if doc["version"] == "0.5.0":
             return cast(GuidelineTagAssociationDocument, doc)
 
         return None
@@ -315,6 +344,7 @@ class GuidelineDocumentStore(GuidelineStore):
             creation_utc=guideline.creation_utc.isoformat(),
             condition=guideline.content.condition,
             action=guideline.content.action,
+            description=guideline.content.description,
             enabled=guideline.enabled,
             metadata=guideline.metadata,
         )
@@ -334,7 +364,9 @@ class GuidelineDocumentStore(GuidelineStore):
             id=GuidelineId(guideline_document["id"]),
             creation_utc=datetime.fromisoformat(guideline_document["creation_utc"]),
             content=GuidelineContent(
-                condition=guideline_document["condition"], action=guideline_document["action"]
+                condition=guideline_document["condition"],
+                action=guideline_document["action"],
+                description=guideline_document.get("description", None),
             ),
             enabled=guideline_document["enabled"],
             tags=[TagId(tag_id) for tag_id in tag_ids],
@@ -346,22 +378,35 @@ class GuidelineDocumentStore(GuidelineStore):
         self,
         condition: str,
         action: Optional[str] = None,
+        description: Optional[str] = None,
         metadata: Mapping[str, JSONSerializable] = {},
         creation_utc: Optional[datetime] = None,
         enabled: bool = True,
         tags: Optional[Sequence[TagId]] = None,
+        id: Optional[GuidelineId] = None,
     ) -> Guideline:
         async with self._lock.writer_lock:
             creation_utc = creation_utc or datetime.now(timezone.utc)
 
-            guideline_checksum = md5_checksum(f"{condition}{action or ''}{enabled}{metadata}")
+            # Use provided ID or generate one
+            if id is not None:
+                guideline_id = id
+
+                # Check if guideline with this ID already exists
+                existing = await self._collection.find_one(filters={"id": {"$eq": guideline_id}})
+                if existing:
+                    raise ValueError(f"Guideline with id '{guideline_id}' already exists")
+            else:
+                guideline_checksum = md5_checksum(f"{condition}{action or ''}{enabled}{metadata}")
+                guideline_id = GuidelineId(self._id_generator.generate(guideline_checksum))
 
             guideline = Guideline(
-                id=GuidelineId(self._id_generator.generate(guideline_checksum)),
+                id=guideline_id,
                 creation_utc=creation_utc,
                 content=GuidelineContent(
                     condition=condition,
                     action=action,
+                    description=description,
                 ),
                 enabled=enabled,
                 tags=tags or [],
@@ -476,6 +521,7 @@ class GuidelineDocumentStore(GuidelineStore):
                 {
                     **({"condition": params["condition"]} if "condition" in params else {}),
                     **({"action": params["action"]} if "action" in params else {}),
+                    **({"description": params["description"]} if "description" in params else {}),
                     **({"enabled": params["enabled"]} if "enabled" in params else {}),
                 }
             )
