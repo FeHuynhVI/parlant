@@ -277,6 +277,8 @@ class ToolCaller:
                     f"Execution::Result: Tool call failed ({tool_id.to_string()}/{tool_call.id})\n{traceback.format_exception(exc)}"
                 )
                 raise
+            
+            print(result.data)
 
             return ToolCallResult(
                 id=ToolResultId(generate_id()),
