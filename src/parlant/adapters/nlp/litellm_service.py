@@ -167,7 +167,6 @@ class LiteLLMSchematicGenerator(BaseSchematicGenerator[T]):
 
         raw_output = response.choices[0].message.content or "{}"
         raw_content = raw_output.encode("utf-8", errors="replace").decode("utf-8")
-        self._logger.debug(f"Checkeds raw content from LiteLLM response. {raw_content[0:1000]}...")
         try:
             json_content = json.loads(normalize_json_output(raw_content))
         except json.JSONDecodeError:
