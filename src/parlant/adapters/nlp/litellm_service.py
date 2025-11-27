@@ -165,7 +165,8 @@ class LiteLLMSchematicGenerator(BaseSchematicGenerator[T]):
         if response.usage:
             self._logger.trace(response.usage.model_dump_json(indent=2))
 
-        raw_content = response.choices[0].message.content or "{}"
+        raw_output = response.choices[0].message.content or "{}"
+        raw_content = raw_output.encode("utf-8", errors="replace").decode("utf-8")
 
         try:
             json_content = json.loads(normalize_json_output(raw_content))
