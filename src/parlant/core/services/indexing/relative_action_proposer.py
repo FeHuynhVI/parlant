@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import json
 import traceback
 from typing import Optional, Sequence
+
+from pydantic import field_validator
 from parlant.core.common import DefaultBaseModel
 from parlant.core.engines.alpha.guideline_matching.generic.journey_node_selection_batch import (
     _JourneyEdge,
@@ -38,6 +40,15 @@ class RelativeActionBatch(DefaultBaseModel):
     needs_rewrite: bool
     former_reference: Optional[str] = None
     rewritten_action: Optional[str] = None
+    
+    @field_validator("conditions", mode="before")
+    def normalize_conditions(cls, v):
+        if isinstance(v, list):
+            # convert list to string
+            return ", ".join(str(x) for x in v)
+        if v is None:
+            return ""
+        return str(v)
 
 
 class RelativeActionSchema(DefaultBaseModel):
