@@ -37,8 +37,8 @@ litellm.register_model({
 })
 
 litellm.register_model({
-        "litellm_proxy/gemma-3-27b-it": {
-        "max_tokens": 8192, 
+        "gpt-oss-120b": {
+        "max_tokens": 128000, 
         "input_cost_per_token": 2898.72, 
         "output_cost_per_token": 4348.08, 
         "litellm_provider": "litellm_proxy", 
