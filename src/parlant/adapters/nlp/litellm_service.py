@@ -25,6 +25,7 @@ import tiktoken
 
 import litellm
 from litellm import register_model
+litellm.turn_off_message_logging = True
 
 litellm.register_model({
         "gemma-3-27b-it": {
