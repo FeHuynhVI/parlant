@@ -281,14 +281,8 @@ class ToolCaller:
             raw_data = result.data
             if isinstance(raw_data, bytes):
                 utf8_data = raw_data.decode("utf-8", errors="replace")
-                self._logger.debug(
-                    f"Result data was bytes; converted to UTF-8 string. {utf8_data}"
-                )
             else:
                 utf8_data = str(raw_data).encode("utf-8", errors="replace").decode("utf-8")
-                self._logger.debug(
-                    f"Result data was not bytes; converted to UTF-8 string. {utf8_data}"
-                )
                 
             return ToolCallResult(
                 id=ToolResultId(generate_id()),
