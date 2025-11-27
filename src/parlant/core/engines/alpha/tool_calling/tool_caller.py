@@ -270,7 +270,7 @@ class ToolCaller:
                 )
 
                 self._logger.debug(
-                    f"Execution::Result: Tool call succeeded ({tool_call.tool_id.to_string()}/{tool_call.id})\n{json.dumps(asdict(result), indent=2, default=str)}"
+                    f"Execution::Result: Tool call succeeded ({tool_call.tool_id.to_string()}/{tool_call.id})\n{json.dumps(asdict(result), indent=2, default=str, ensure_ascii=False)}"
                 )
             except Exception as exc:
                 self._logger.error(
@@ -278,13 +278,20 @@ class ToolCaller:
                 )
                 raise
             
-            print(result.data)
-
+            raw_data = result.data
+            if isinstance(raw_data, bytes):
+                utf8_data = raw_data.decode("utf-8", errors="replace")
+            else:
+                utf8_data = str(raw_data).encode("utf-8", errors="replace").decode("utf-8")
+                self._logger.debug(
+                    f"Result data was not bytes; converted to UTF-8 string. {utf8_data}"
+                )
+                
             return ToolCallResult(
                 id=ToolResultId(generate_id()),
                 tool_call=tool_call,
                 result={
-                    "data": result.data,
+                    "data": utf8_data,
                     "metadata": result.metadata,
                     "control": result.control,
                     "canned_responses": result.canned_responses,
