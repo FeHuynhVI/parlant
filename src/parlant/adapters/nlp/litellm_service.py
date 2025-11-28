@@ -273,8 +273,8 @@ Please set LITELLM_PROVIDER_API_KEY in your environment before running Parlant.
 
     @override
     async def get_embedder(self) -> Embedder:
-        return AITeamVNAIEmbedder(self._logger, self._meter)
-        #return JinaAIEmbedder(self._logger, self._meter)
+        #return AITeamVNAIEmbedder(self._logger, self._meter)
+        return JinaAIEmbedder(self._logger, self._meter)
 
     @override
     async def get_moderation_service(self) -> ModerationService:
