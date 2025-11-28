@@ -167,13 +167,13 @@ class JinaAIEmbedder(HuggingFaceEmbedder):
         super().__init__(
             logger=logger,
             meter=meter,
-            model_name="jinaai/jina-embeddings-v2-base-en",
+            model_name="jinaai/jina-embeddings-v3",
         )
 
     @property
     @override
     def dimensions(self) -> int:
-        return 768
+        return 1024
 
 
 class AITeamVNAIEmbedder(HuggingFaceEmbedder):
