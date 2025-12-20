@@ -40,15 +40,6 @@ class RelativeActionBatch(DefaultBaseModel):
     needs_rewrite: bool
     former_reference: Optional[str] = None
     rewritten_action: Optional[str] = None
-    
-    @field_validator("conditions", mode="before")
-    def normalize_conditions(cls, v):
-        if isinstance(v, list):
-            # convert list to string
-            return ", ".join(str(x) for x in v)
-        if v is None:
-            return ""
-        return str(v)
 
 
 class RelativeActionSchema(DefaultBaseModel):
