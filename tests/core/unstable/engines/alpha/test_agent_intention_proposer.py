@@ -21,7 +21,7 @@ from pytest import fixture
 
 from parlant.core.agents import Agent
 from parlant.core.capabilities import Capability, CapabilityId
-from parlant.core.common import JSONSerializable, generate_id
+from parlant.core.common import Criticality, JSONSerializable, generate_id
 from parlant.core.meter import Meter
 from parlant.core.tracer import Tracer
 from parlant.core.customers import Customer
@@ -125,7 +125,7 @@ def match_guidelines(
         session=session,
         session_event_emitter=EventBuffer(agent),
         response_event_emitter=EventBuffer(agent),
-        interaction=Interaction(history=interaction_history),
+        interaction=Interaction(events=interaction_history),
         state=ResponseState(
             context_variables=[],
             glossary_terms=set(),
@@ -190,6 +190,7 @@ def create_guideline(
             condition=condition,
             action=action,
         ),
+        criticality=Criticality.MEDIUM,
         enabled=True,
         tags=[],
         metadata=metadata,

@@ -1,7 +1,7 @@
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Sequence, cast
-from parlant.core.common import JSONSerializable
+from parlant.core.common import Criticality, JSONSerializable
 from parlant.core.engines.alpha.guideline_matching.generic.common import (
     format_journey_node_guideline_id,
 )
@@ -98,11 +98,14 @@ class JourneyGuidelineProjection:
                 content=GuidelineContent(
                     condition=edge.condition if edge and edge.condition else "",
                     action=node.action,
+                    description=node.description,
                 ),
+                criticality=Criticality.HIGH,
                 creation_utc=datetime.now(timezone.utc),
                 enabled=True,
                 tags=[],
                 metadata=metadata,
+                composition_mode=node.composition_mode,
             )
 
         def add_edge_guideline_metadata(

@@ -18,8 +18,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from parlant.core.agents import CompositionMode
 from parlant.core.async_utils import ReaderWriterLock
 from parlant.core.common import (
+    Criticality,
     ItemNotFoundError,
     JSONSerializable,
     UniqueId,
@@ -57,6 +59,8 @@ class Guideline:
     enabled: bool
     tags: Sequence[TagId]
     metadata: Mapping[str, JSONSerializable]
+    criticality: Criticality
+    composition_mode: Optional[CompositionMode] = None
 
     def __str__(self) -> str:
         if self.content.condition and self.content.action:
@@ -79,8 +83,10 @@ class GuidelineUpdateParams(TypedDict, total=False):
     condition: str
     action: Optional[str]
     description: Optional[str]
+    criticality: Criticality
     enabled: bool
     metadata: Mapping[str, JSONSerializable]
+    composition_mode: Optional[CompositionMode]
 
 
 class GuidelineStore(ABC):
@@ -90,11 +96,13 @@ class GuidelineStore(ABC):
         condition: str,
         action: Optional[str] = None,
         description: Optional[str] = None,
+        criticality: Optional[Criticality] = None,
         metadata: Mapping[str, JSONSerializable] = {},
         creation_utc: Optional[datetime] = None,
         enabled: bool = True,
         tags: Optional[Sequence[TagId]] = None,
         id: Optional[GuidelineId] = None,
+        composition_mode: Optional[CompositionMode] = None,
     ) -> Guideline: ...
 
     @abstractmethod
@@ -187,7 +195,7 @@ class GuidelineDocument_v0_3_0(TypedDict, total=False):
     enabled: bool
 
 
-class GuidelineDocument(TypedDict, total=False):
+class GuidelineDocument_v0_4_0(TypedDict, total=False):
     id: ObjectId
     version: Version.String
     creation_utc: str
@@ -196,6 +204,42 @@ class GuidelineDocument(TypedDict, total=False):
     description: Optional[str]
     enabled: bool
     metadata: Mapping[str, JSONSerializable]
+
+
+class GuidelineDocument_v0_5_0(TypedDict, total=False):
+    id: ObjectId
+    version: Version.String
+    creation_utc: str
+    condition: str
+    action: Optional[str]
+    description: Optional[str]
+    enabled: bool
+    metadata: Mapping[str, JSONSerializable]
+
+
+class GuidelineDocument_v0_6_0(TypedDict, total=False):
+    id: ObjectId
+    version: Version.String
+    creation_utc: str
+    condition: str
+    action: Optional[str]
+    description: Optional[str]
+    criticality: str
+    enabled: bool
+    metadata: Mapping[str, JSONSerializable]
+
+
+class GuidelineDocument(TypedDict, total=False):
+    id: ObjectId
+    version: Version.String
+    creation_utc: str
+    condition: str
+    action: Optional[str]
+    description: Optional[str]
+    criticality: str
+    enabled: bool
+    metadata: Mapping[str, JSONSerializable]
+    composition_mode: Optional[str]
 
 
 class GuidelineTagAssociationDocument(TypedDict, total=False):
@@ -220,7 +264,7 @@ async def guideline_document_converter_0_1_0_to_0_2_0(doc: BaseDocument) -> Opti
 
 
 class GuidelineDocumentStore(GuidelineStore):
-    VERSION = Version.from_string("0.5.0")
+    VERSION = Version.from_string("0.7.0")
 
     def __init__(
         self,
@@ -238,9 +282,38 @@ class GuidelineDocumentStore(GuidelineStore):
         self._lock = ReaderWriterLock()
 
     async def _document_loader(self, doc: BaseDocument) -> Optional[GuidelineDocument]:
-        async def v0_4_0_to_v0_5_0(doc: BaseDocument) -> Optional[BaseDocument]:
-            d = cast(GuidelineDocument, doc)
+        async def v0_6_0_to_v0_7_0(doc: BaseDocument) -> Optional[BaseDocument]:
+            d = cast(GuidelineDocument_v0_6_0, doc)
             return GuidelineDocument(
+                id=d["id"],
+                version=Version.String("0.7.0"),
+                creation_utc=d["creation_utc"],
+                condition=d["condition"],
+                action=d["action"],
+                description=d.get("description", None),
+                criticality=d["criticality"],
+                enabled=d["enabled"],
+                metadata=d["metadata"],
+                composition_mode=None,  # Default to None for existing guidelines
+            )
+
+        async def v0_5_0_to_v0_6_0(doc: BaseDocument) -> Optional[BaseDocument]:
+            d = cast(GuidelineDocument_v0_5_0, doc)
+            return GuidelineDocument_v0_6_0(
+                id=d["id"],
+                version=Version.String("0.6.0"),
+                creation_utc=d["creation_utc"],
+                condition=d["condition"],
+                action=d["action"],
+                description=d.get("description", None),
+                criticality="medium",  # Default to MEDIUM for existing guidelines
+                enabled=d["enabled"],
+                metadata=d["metadata"],
+            )
+
+        async def v0_4_0_to_v0_5_0(doc: BaseDocument) -> Optional[BaseDocument]:
+            d = cast(GuidelineDocument_v0_4_0, doc)
+            return GuidelineDocument_v0_5_0(
                 id=d["id"],
                 version=Version.String("0.5.0"),
                 creation_utc=d["creation_utc"],
@@ -253,7 +326,7 @@ class GuidelineDocumentStore(GuidelineStore):
 
         async def v0_3_0_to_v0_4_0(doc: BaseDocument) -> Optional[BaseDocument]:
             d = cast(GuidelineDocument_v0_3_0, doc)
-            return GuidelineDocument(
+            return GuidelineDocument_v0_4_0(
                 id=d["id"],
                 version=Version.String("0.4.0"),
                 creation_utc=d["creation_utc"],
@@ -275,6 +348,8 @@ class GuidelineDocumentStore(GuidelineStore):
                 "0.2.0": v0_2_0_to_v0_3_0,
                 "0.3.0": v0_3_0_to_v0_4_0,
                 "0.4.0": v0_4_0_to_v0_5_0,
+                "0.5.0": v0_5_0_to_v0_6_0,
+                "0.6.0": v0_6_0_to_v0_7_0,
             },
         ).migrate(doc)
 
@@ -345,8 +420,12 @@ class GuidelineDocumentStore(GuidelineStore):
             condition=guideline.content.condition,
             action=guideline.content.action,
             description=guideline.content.description,
+            criticality=guideline.criticality.value,
             enabled=guideline.enabled,
             metadata=guideline.metadata,
+            composition_mode=(
+                guideline.composition_mode.value if guideline.composition_mode else None
+            ),
         )
 
     async def _deserialize(
@@ -360,6 +439,9 @@ class GuidelineDocumentStore(GuidelineStore):
             )
         ]
 
+        composition_mode_str = guideline_document.get("composition_mode")
+        composition_mode = CompositionMode(composition_mode_str) if composition_mode_str else None
+
         return Guideline(
             id=GuidelineId(guideline_document["id"]),
             creation_utc=datetime.fromisoformat(guideline_document["creation_utc"]),
@@ -368,9 +450,11 @@ class GuidelineDocumentStore(GuidelineStore):
                 action=guideline_document["action"],
                 description=guideline_document.get("description", None),
             ),
+            criticality=Criticality(guideline_document["criticality"]),
             enabled=guideline_document["enabled"],
             tags=[TagId(tag_id) for tag_id in tag_ids],
             metadata=guideline_document["metadata"],
+            composition_mode=composition_mode,
         )
 
     @override
@@ -379,14 +463,17 @@ class GuidelineDocumentStore(GuidelineStore):
         condition: str,
         action: Optional[str] = None,
         description: Optional[str] = None,
+        criticality: Optional[Criticality] = None,
         metadata: Mapping[str, JSONSerializable] = {},
         creation_utc: Optional[datetime] = None,
         enabled: bool = True,
         tags: Optional[Sequence[TagId]] = None,
         id: Optional[GuidelineId] = None,
+        composition_mode: Optional[CompositionMode] = None,
     ) -> Guideline:
         async with self._lock.writer_lock:
             creation_utc = creation_utc or datetime.now(timezone.utc)
+            criticality = criticality or Criticality.MEDIUM
 
             # Use provided ID or generate one
             if id is not None:
@@ -408,9 +495,11 @@ class GuidelineDocumentStore(GuidelineStore):
                     action=action,
                     description=description,
                 ),
+                criticality=criticality,
                 enabled=enabled,
                 tags=tags or [],
                 metadata=metadata,
+                composition_mode=composition_mode,
             )
 
             await self._collection.insert_one(
@@ -522,7 +611,24 @@ class GuidelineDocumentStore(GuidelineStore):
                     **({"condition": params["condition"]} if "condition" in params else {}),
                     **({"action": params["action"]} if "action" in params else {}),
                     **({"description": params["description"]} if "description" in params else {}),
+                    **(
+                        {"criticality": params["criticality"].value}
+                        if "criticality" in params
+                        else {}
+                    ),
                     **({"enabled": params["enabled"]} if "enabled" in params else {}),
+                    **(
+                        {
+                            "composition_mode": (
+                                # Note that updating to None is also valid
+                                params["composition_mode"].value
+                                if params["composition_mode"] is not None
+                                else None
+                            )
+                        }
+                        if "composition_mode" in params
+                        else {}
+                    ),
                 }
             )
 

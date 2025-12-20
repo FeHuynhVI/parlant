@@ -287,6 +287,7 @@ Examples of Guideline Match Evaluations:
         builder.add_context_variables(self._context.context_variables)
         builder.add_glossary(self._context.terms)
         builder.add_capabilities_for_guideline_matching(self._context.capabilities)
+        builder.add_customer_identity(self._context.customer, self._context.session)
         builder.add_interaction_history(self._context.interaction_history)
         builder.add_staged_tool_events(self._context.staged_events)
         builder.add_section(
@@ -296,7 +297,13 @@ Examples of Guideline Match Evaluations:
 {guidelines_text}
 ###
 """,
-            props={"guidelines_text": guidelines_text},
+            props={
+                "guidelines_text": guidelines_text,
+                "guidelines": [
+                    {"condition": g.content.condition, "action": g.content.action}
+                    for g in self._guidelines.values()
+                ],
+            },
             status=SectionStatus.ACTIVE,
         )
 

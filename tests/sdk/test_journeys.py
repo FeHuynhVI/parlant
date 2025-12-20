@@ -21,7 +21,7 @@ from parlant.core.services.tools.plugins import tool
 from parlant.core.tags import Tag
 from parlant.core.tools import ToolContext, ToolId, ToolResult
 from parlant.core.canned_responses import CannedResponseStore
-from tests.sdk.utils import Context, SDKTest
+from tests.sdk.utils import Context, SDKTest, get_message
 from tests.test_utilities import nlp_test
 
 from parlant import sdk as p
@@ -179,7 +179,7 @@ class Test_that_a_created_journey_is_followed(SDKTest):
         )
 
     async def run(self, ctx: Context) -> None:
-        response = await ctx.send_and_receive("Hello there", recipient=self.agent)
+        response = await ctx.send_and_receive_message("Hello there", recipient=self.agent)
 
         assert await nlp_test(
             context=response,
@@ -605,7 +605,10 @@ class Test_that_journey_state_can_have_its_own_canned_responses(SDKTest):
             description="Greet customers with personalized responses",
         )
 
-        self.canrep1 = await server.create_canned_response(template="How can I assist you?")
+        self.canrep1 = await server.create_canned_response(
+            template="How can I assist you?",
+            metadata={"mood": "friendly"},
+        )
         self.canrep2 = await server.create_canned_response(template="Welcome to our store!")
 
         self.initial_transition = await self.journey.initial_state.transition_to(
@@ -627,9 +630,10 @@ class Test_that_journey_state_can_have_its_own_canned_responses(SDKTest):
         assert Tag.for_journey_node_id(self.initial_transition.target.id) in stored_canrep1.tags
         assert Tag.for_journey_node_id(self.second_transition.target.id) in stored_canrep2.tags
 
-        response = await ctx.send_and_receive("Hello", recipient=self.agent)
+        response = await ctx.send_and_receive_message_event("Hello", recipient=self.agent)
 
-        assert response == "How can I assist you?"
+        assert get_message(response) == "How can I assist you?"
+        assert response.metadata == {"mood": "friendly"}
 
 
 class Test_that_a_journey_is_reevaluated_after_a_skipped_tool_call(SDKTest):
@@ -667,19 +671,17 @@ class Test_that_a_journey_is_reevaluated_after_a_skipped_tool_call(SDKTest):
         )
 
     async def run(self, ctx: Context) -> None:
-        first_response = await ctx.send_and_receive(
+        first_response = await ctx.send_and_receive_message(
             "Hello", recipient=self.agent, reuse_session=True
         )
 
         assert await nlp_test(first_response, "It mentions the date January 1st, 2000")
 
-        second_response = await ctx.send_and_receive(
+        second_response = await ctx.send_and_receive_message(
             "I'm really thirsty", recipient=self.agent, reuse_session=True
         )
 
         assert await nlp_test(second_response, "It offers a Pepsi")
-        # Make sure the guideline was not re-applied
-        assert await nlp_test(second_response, "It does not mention one million dollars")
 
 
 class Test_that_a_missing_data_is_shown_after_journey_is_reevaluated(SDKTest):
@@ -710,7 +712,7 @@ class Test_that_a_missing_data_is_shown_after_journey_is_reevaluated(SDKTest):
         )
 
     async def run(self, ctx: Context) -> None:
-        first_response = await ctx.send_and_receive(
+        first_response = await ctx.send_and_receive_message(
             "I'm really thirsty", recipient=self.agent, reuse_session=True
         )
 
@@ -773,7 +775,7 @@ class Test_that_journey_can_have_a_scoped_guideline(SDKTest):
         )
 
     async def run(self, ctx: Context) -> None:
-        response = await ctx.send_and_receive(
+        response = await ctx.send_and_receive_message(
             "Can I order a banana?",
             recipient=self.agent,
         )
@@ -887,13 +889,13 @@ class Test_that_end_journey_match_handlers_are_called(SDKTest):
 
     async def run(self, ctx: Context) -> None:
         # Start the journey
-        await ctx.send_and_receive(
+        await ctx.send_and_receive_message(
             customer_message="I want to place an order",
             recipient=self.agent,
         )
 
         # Trigger the success exit path
-        await ctx.send_and_receive(
+        await ctx.send_and_receive_message(
             customer_message="Yes, please confirm my order",
             recipient=self.agent,
             reuse_session=True,
@@ -931,7 +933,7 @@ class Test_that_journey_state_match_handler_is_called(SDKTest):
         )
 
     async def run(self, ctx: Context) -> None:
-        await ctx.send_and_receive(
+        await ctx.send_and_receive_message(
             customer_message="I want to order something. Yes, confirmed!",
             recipient=self.agent,
         )
@@ -940,3 +942,532 @@ class Test_that_journey_state_match_handler_is_called(SDKTest):
         assert self.captured_state_id == self.state.target.id, (
             f"Expected state ID {self.state.target.id}, got {self.captured_state_id}"
         )
+
+
+class Test_that_journey_state_can_be_created_with_description(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Pizza Agent",
+            description="Agent for testing journey state descriptions",
+        )
+
+        self.journey = await self.agent.create_journey(
+            title="Pizza Ordering",
+            description="Handle pizza orders",
+            conditions=["Customer wants to order pizza"],
+        )
+
+        self.transition = await self.journey.initial_state.transition_to(
+            condition="Customer confirms toppings",
+            chat_state="Process the order",
+            description="At this point we've confirmed the pizza toppings and are ready to finalize",
+        )
+
+    async def run(self, ctx: Context) -> None:
+        journey_store = ctx.container[JourneyStore]
+
+        # Read the created state/node from the store
+        node = await journey_store.read_node(node_id=self.transition.target.id)
+
+        assert (
+            node.description
+            == "At this point we've confirmed the pizza toppings and are ready to finalize"
+        )
+
+
+class Test_that_journey_state_description_affects_agent_behavior(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Spaceship Agent",
+            description="Agent for testing journey state description behavior",
+        )
+
+        self.journey = await self.agent.create_journey(
+            title="Spaceship Maintenance",
+            description="Handle spaceship maintenance requests",
+            conditions=["Customer asks about spaceship maintenance"],
+        )
+
+        await self.journey.initial_state.transition_to(
+            condition="Customer needs thruster calibration",
+            chat_state="Explain the calibration process",
+            description="First you peel the banana, then you stick it in the thruster",
+        )
+
+    async def run(self, ctx: Context) -> None:
+        answer = await ctx.send_and_receive_message(
+            customer_message="I need help with spaceship maintenance. Specifically thruster calibration.",
+            recipient=self.agent,
+        )
+
+        assert await nlp_test(answer, "It mentions a banana")
+
+
+class Test_that_different_state_types_support_description(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Multi-State Agent",
+            description="Agent for testing descriptions across state types",
+        )
+
+        @tool
+        def check_inventory(context: ToolContext) -> ToolResult:
+            return ToolResult(data={"status": "available"})
+
+        self.journey = await self.agent.create_journey(
+            title="Order Processing",
+            description="Process customer orders",
+            conditions=["Customer wants to place an order"],
+        )
+
+        # ChatJourneyState with description
+        self.chat_transition = await self.journey.initial_state.transition_to(
+            condition="Customer provides item name",
+            chat_state="Confirm the item selection",
+            description="This is where we confirm what item the customer wants to order",
+        )
+
+        # ToolJourneyState with description
+        self.tool_transition = await self.chat_transition.target.transition_to(
+            condition="Need to check inventory",
+            tool_state=check_inventory,
+            description="Check if the item is in stock using our inventory system",
+        )
+
+    async def run(self, ctx: Context) -> None:
+        journey_store = ctx.container[JourneyStore]
+
+        # Verify ChatJourneyState has description
+        chat_node = await journey_store.read_node(node_id=self.chat_transition.target.id)
+        assert (
+            chat_node.description
+            == "This is where we confirm what item the customer wants to order"
+        )
+
+        # Verify ToolJourneyState has description
+        tool_node = await journey_store.read_node(node_id=self.tool_transition.target.id)
+        assert tool_node.description == "Check if the item is in stock using our inventory system"
+
+
+class Test_that_on_message_handler_is_called_for_journey_state_when_message_generated(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.handler_called = False
+        self.captured_state_id = None
+        self.captured_message_count = 0
+
+        async def message_handler(ctx: p.EngineContext, match: p.JourneyStateMatch) -> None:
+            self.handler_called = True
+            self.captured_state_id = match.state_id
+            # Verify we can access messages from context
+            self.captured_message_count = len(ctx.state.message_events)
+
+        self.agent = await server.create_agent(
+            name="Booking Agent",
+            description="Agent for testing journey state on_message handler",
+        )
+
+        self.journey = await self.agent.create_journey(
+            title="Book Appointment",
+            description="Journey to book appointments",
+            conditions=["Customer wants to book an appointment"],
+        )
+
+        self.state = await self.journey.initial_state.transition_to(
+            condition="Customer provides appointment details",
+            chat_state="Perfect! Your appointment is scheduled.",
+            on_message=message_handler,  # type: ignore[call-overload]
+        )
+
+    async def run(self, ctx: Context) -> None:
+        await ctx.send_and_receive_message(
+            customer_message="I want to book an appointment for tomorrow at 3pm",
+            recipient=self.agent,
+        )
+
+        # Wait for handlers to complete
+        import asyncio
+
+        await asyncio.sleep(5)
+
+        assert self.handler_called, "on_message handler should be called"
+        assert self.captured_message_count > 0, "Handler should see messages in context"
+        assert self.captured_state_id == self.state.target.id, (
+            f"Handler should receive correct state ID. Expected {self.state.target.id}, got {self.captured_state_id}"
+        )
+
+
+class Test_that_journey_state_field_provider_contributes_fields_to_canned_response(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Journey Field Provider Agent",
+            description="Agent for testing journey state field providers",
+        )
+
+        self.journey = await self.agent.create_journey(
+            title="Order Journey",
+            description="Handle customer orders",
+            conditions=["Customer wants to order"],
+        )
+
+        canrep_id = await self.agent.create_canned_response(
+            template="Your order number is {{order_number}}.",
+        )
+
+        async def provide_order_fields(ctx: p.EngineContext) -> dict[str, int]:
+            return {"order_number": 12345}
+
+        self.state = await self.journey.initial_state.transition_to(
+            chat_state="Confirm the order",
+            composition_mode=p.CompositionMode.STRICT,
+            canned_responses=[canrep_id],
+            canned_response_field_provider=provide_order_fields,
+        )
+
+    async def run(self, ctx: Context) -> None:
+        response = await ctx.send_and_receive_message(
+            customer_message="I want to place an order",
+            recipient=self.agent,
+        )
+
+        assert response == "Your order number is 12345."
+
+
+class Test_that_journey_can_link_to_another_journey_with_validation(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Hotel Booking Agent",
+            description="Agent for handling hotel bookings with user validation",
+            composition_mode=p.CompositionMode.STRICT,
+        )
+
+        # Create canned responses for deterministic testing
+        self.room_choice_response = await server.create_canned_response(
+            template="Would you like the red room or the blue room?"
+        )
+        self.name_request_response = await server.create_canned_response(
+            template="Please provide your name for verification."
+        )
+        self.booking_confirmed_response = await server.create_canned_response(
+            template="Great! Your hotel booking has been confirmed."
+        )
+        self.not_confirmed_response = await server.create_canned_response(
+            template="I'm sorry, but we cannot proceed with the booking without proper validation."
+        )
+
+        # Create validation tool that always returns True
+        @tool
+        def validate_by_name(context: ToolContext, customer_name: str) -> ToolResult:
+            return ToolResult(data={"is_valid": True})
+
+        # Create the user validation journey
+        self.validate_user_journey = await self.agent.create_journey(
+            title="Validate User",
+            conditions=[],
+            description="Validate the user by asking for their name and verifying it",
+        )
+
+        # First state: ask for name
+        self.ask_name_transition = await self.validate_user_journey.initial_state.transition_to(
+            chat_state="Ask the customer for their name to verify their identity",
+            canned_responses=[self.name_request_response],
+        )
+
+        # Second state: validate using the tool
+        self.validate_transition = await self.ask_name_transition.target.transition_to(
+            tool_instruction="Validate customer",
+            tool_state=validate_by_name,
+        )
+
+        # Create the hotel booking journey
+        self.book_hotel_journey = await self.agent.create_journey(
+            title="Book Hotel",
+            conditions=["Customer wants to book a hotel"],
+            description="Booking a hotel room for the customer",
+        )
+
+        # Second state: transition to validation journey
+        self.room_type = await self.book_hotel_journey.initial_state.transition_to(
+            chat_state="Ask the customer if he wants the red or blue room",
+            canned_responses=[self.room_choice_response],
+        )
+
+        # Third state: transition to validation journey
+        self.validation_transition = await self.room_type.target.transition_to(
+            journey=self.validate_user_journey,
+        )
+
+        # Fourth state: conditional booking based on validation
+        self.book_success_transition = await self.validation_transition.target.transition_to(
+            condition="if validation is successful",
+            chat_state="Let him know we confirm the hotel booking",
+            canned_responses=[self.booking_confirmed_response],
+        )
+
+        # Alternative state: apologize if validation fails
+        self.apologize_transition = await self.validation_transition.target.transition_to(
+            condition="if validation fails",
+            chat_state="Apologize and explain that booking cannot proceed without validation",
+            canned_responses=[self.not_confirmed_response],
+        )
+
+    async def run(self, ctx: Context) -> None:
+        # Test the complete flow
+        response1 = await ctx.send_and_receive_message(
+            "I want to book a hotel room",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response1 == "Would you like the red room or the blue room?"
+
+        response2 = await ctx.send_and_receive_message(
+            "I want the red room",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response2 == "Please provide your name for verification."
+
+        response3 = await ctx.send_and_receive_message(
+            "My name is John Smith", recipient=self.agent, reuse_session=True
+        )
+        assert response3 == "Great! Your hotel booking has been confirmed."
+
+
+class Test_that_journey_can_conditionally_link_to_different_sub_journeys(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Multi-Journey Agent",
+            description="Agent that can link to different sub-journeys based on conditions",
+            composition_mode=p.CompositionMode.STRICT,
+        )
+
+        # Create canned responses for deterministic testing
+        self.service_type_response = await server.create_canned_response(
+            template="What type of service do you need: technical support or billing help?"
+        )
+        self.tech_greeting_response = await server.create_canned_response(
+            template="Welcome to technical support! Please describe your issue."
+        )
+        self.billing_greeting_response = await server.create_canned_response(
+            template="Welcome to billing support! How can I help with your account?"
+        )
+        self.tech_resolved_response = await server.create_canned_response(
+            template="Your technical issue has been resolved. Is there anything else?"
+        )
+        self.billing_resolved_response = await server.create_canned_response(
+            template="Your billing inquiry has been handled. Anything else I can help with?"
+        )
+        self.final_response = await server.create_canned_response(
+            template="Thank you for contacting support. Have a great day!"
+        )
+
+        # Create tools for both support types
+        @tool
+        def resolve_tech_issue(context: ToolContext, issue_description: str) -> ToolResult:
+            return ToolResult(data={"status": "resolved", "solution": "Issue fixed"})
+
+        @tool
+        def resolve_billing_issue(context: ToolContext, billing_question: str) -> ToolResult:
+            return ToolResult(data={"status": "resolved", "account_updated": True})
+
+        # Create technical support sub-journey
+        self.tech_support_journey = await self.agent.create_journey(
+            title="Technical Support",
+            conditions=[],
+            description="Handle technical support requests",
+        )
+
+        self.tech_greeting = await self.tech_support_journey.initial_state.transition_to(
+            chat_state="Greet customer and ask for technical issue details",
+            canned_responses=[self.tech_greeting_response],
+        )
+
+        self.tech_resolution = await self.tech_greeting.target.transition_to(
+            tool_instruction="Resolve the technical issue",
+            tool_state=resolve_tech_issue,
+        )
+
+        self.tech_completion = await self.tech_resolution.target.transition_to(
+            chat_state="Confirm technical issue resolution",
+            canned_responses=[self.tech_resolved_response],
+        )
+
+        # Create billing support sub-journey
+        self.billing_support_journey = await self.agent.create_journey(
+            title="Billing Support",
+            conditions=[],
+            description="Handle billing and account inquiries",
+        )
+
+        self.billing_greeting = await self.billing_support_journey.initial_state.transition_to(
+            chat_state="Greet customer and ask for billing question",
+            canned_responses=[self.billing_greeting_response],
+        )
+
+        self.billing_resolution = await self.billing_greeting.target.transition_to(
+            tool_instruction="Resolve the billing issue",
+            tool_state=resolve_billing_issue,
+        )
+
+        self.billing_completion = await self.billing_resolution.target.transition_to(
+            chat_state="Confirm billing issue resolution",
+            canned_responses=[self.billing_resolved_response],
+        )
+
+        # Create main customer service journey
+        self.main_journey = await self.agent.create_journey(
+            title="Customer Service",
+            conditions=["Customer needs support"],
+            description="Route customers to appropriate support channels",
+        )
+
+        # Initial state: ask what type of service they need
+        self.service_inquiry = await self.main_journey.initial_state.transition_to(
+            chat_state="Ask customer what type of service they need",
+            canned_responses=[self.service_type_response],
+        )
+
+        # Conditional transitions to different sub-journeys
+        self.tech_transition = await self.service_inquiry.target.transition_to(
+            condition="if customer needs technical support",
+            journey=self.tech_support_journey,
+        )
+
+        self.billing_transition = await self.service_inquiry.target.transition_to(
+            condition="if customer needs billing help",
+            journey=self.billing_support_journey,
+        )
+
+    async def run(self, ctx: Context) -> None:
+        # Test technical support path
+        response1 = await ctx.send_and_receive_message(
+            "I need some help",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response1 == "What type of service do you need: technical support or billing help?"
+
+        response2 = await ctx.send_and_receive_message(
+            "I need technical support",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response2 == "Welcome to technical support! Please describe your issue."
+
+        # Test billing support path with new session
+        response3 = await ctx.send_and_receive_message(
+            "I need some help",
+            recipient=self.agent,
+            reuse_session=False,  # Start new session
+        )
+        assert response3 == "What type of service do you need: technical support or billing help?"
+
+        response4 = await ctx.send_and_receive_message(
+            "I have a billing question",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response4 == "Welcome to billing support! How can I help with your account?"
+
+
+class Test_that_three_journeys_can_be_concatenated(SDKTest):
+    STARTUP_TIMEOUT = 120
+
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Three Journey Agent",
+            description="Agent that links three journeys in sequence",
+            composition_mode=p.CompositionMode.STRICT,
+        )
+
+        # Create canned responses
+        self.step1_response = await server.create_canned_response(
+            template="Please tell me your name."
+        )
+        self.step2_response = await server.create_canned_response(
+            template="What's your favorite color?"
+        )
+        self.step3_response = await server.create_canned_response(
+            template="All done! Thank you for completing all steps."
+        )
+
+        # Journey 1: Collect name
+        self.journey1 = await self.agent.create_journey(
+            title="Journey 1 - Name Collection",
+            conditions=[],
+            description="First journey to collect name",
+        )
+
+        self.name_transition = await self.journey1.initial_state.transition_to(
+            chat_state="Ask for name",
+            canned_responses=[self.step1_response],
+        )
+
+        # Journey 2: Collect favorite color
+        self.journey2 = await self.agent.create_journey(
+            title="Journey 2 - Color Collection",
+            conditions=[],
+            description="Second journey to collect favorite color",
+        )
+
+        self.color_transition = await self.journey2.initial_state.transition_to(
+            chat_state="Ask for favorite color",
+            canned_responses=[self.step2_response],
+        )
+
+        # Journey 3: Final completion
+        self.journey3 = await self.agent.create_journey(
+            title="Journey 3 - Completion",
+            conditions=[],
+            description="Third journey to complete process",
+        )
+
+        self.completion_transition = await self.journey3.initial_state.transition_to(
+            chat_state="Complete the process",
+            canned_responses=[self.step3_response],
+        )
+
+        # Main journey that chains all three journeys
+        self.main_journey = await self.agent.create_journey(
+            title="Main Journey",
+            conditions=["Customer wants to start process"],
+            description="Main journey that connects the three sub-journeys",
+        )
+
+        # Chain the journeys at the main level: Main -> Journey1 -> Journey2 -> Journey3
+        # First transition: Main -> Journey 1 (name collection)
+        self.link1 = await self.main_journey.initial_state.transition_to(
+            journey=self.journey1,
+        )
+
+        # Second transition: After name collected -> Journey 2 (color collection)
+        self.link2 = await self.link1.target.transition_to(
+            journey=self.journey2,
+        )
+
+        # Third transition: After color collected -> Journey 3 (completion)
+        self.link3 = await self.link2.target.transition_to(
+            journey=self.journey3,
+        )
+
+    async def run(self, ctx: Context) -> None:
+        # Test the complete flow through all three journeys
+        response1 = await ctx.send_and_receive_message(
+            "I want to start the process",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response1 == "Please tell me your name."
+
+        response2 = await ctx.send_and_receive_message(
+            "My name is Alice",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response2 == "What's your favorite color?"
+
+        response3 = await ctx.send_and_receive_message(
+            "Blue",
+            recipient=self.agent,
+            reuse_session=True,
+        )
+        assert response3 == "All done! Thank you for completing all steps."

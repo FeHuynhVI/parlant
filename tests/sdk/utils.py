@@ -14,12 +14,17 @@
 
 import asyncio
 from dataclasses import dataclass
+import os
 import time
 from typing import Callable, cast
 
 from parlant.client import AsyncParlantClient as Client
 from parlant.client.types.event import Event as ClientEvent
 
+from parlant.adapters.nlp.emcie_service import EmcieService
+from parlant.core.loggers import Logger
+from parlant.core.meter import Meter
+from parlant.core.tracer import Tracer
 import parlant.sdk as p
 
 from parlant.core.engines.alpha.perceived_performance_policy import (
@@ -33,6 +38,7 @@ from tests.test_utilities import get_random_port
 def get_message(event: ClientEvent) -> str:
     if message := event.model_dump().get("data", {}).get("message", ""):
         return cast(str, message)
+
     raise ValueError("Event does not contain a message in its data.")
 
 
@@ -43,12 +49,12 @@ class Context:
     container: p.Container
     _session_id: str | None = None
 
-    async def send_and_receive(
+    async def send_and_receive_message_event(
         self,
         customer_message: str,
         recipient: p.Agent,
         reuse_session: bool = False,
-    ) -> str:
+    ) -> ClientEvent:
         if (not self._session_id) or (not reuse_session):
             self._session_id = (
                 await self.client.sessions.create(
@@ -74,7 +80,21 @@ class Context:
 
         assert len(agent_messages) >= 1
 
-        return get_message(agent_messages[0])
+        return agent_messages[0]
+
+    async def send_and_receive_message(
+        self,
+        customer_message: str,
+        recipient: p.Agent,
+        reuse_session: bool = False,
+    ) -> str:
+        agent_message = await self.send_and_receive_message_event(
+            customer_message=customer_message,
+            recipient=recipient,
+            reuse_session=reuse_session,
+        )
+
+        return get_message(agent_message)
 
 
 class SDKTest:
@@ -141,6 +161,13 @@ class SDKTest:
             log_level=p.LogLevel.TRACE,
             configure_container=configure_container,
             configure_hooks=self.configure_hooks,
+            nlp_service=lambda c: EmcieService(
+                c[Logger],
+                c[Tracer],
+                c[Meter],
+                model_tier=os.environ.get("EMCIE_MODEL_TIER", "jackal"),  # type: ignore
+                model_role=os.environ.get("EMCIE_MODEL_ROLE", "teacher"),  # type: ignore
+            ),
         ), lambda: test_container
 
     async def setup(self, server: p.Server) -> None: ...

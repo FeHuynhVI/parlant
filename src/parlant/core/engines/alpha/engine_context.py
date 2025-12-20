@@ -13,12 +13,13 @@
 # limitations under the License.
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Sequence, cast
+from typing import Any, Optional, Sequence, cast
 from typing_extensions import deprecated
 
 from parlant.core.agents import Agent
+from parlant.core.async_utils import Stopwatch
 from parlant.core.capabilities import Capability
 from parlant.core.common import JSONSerializable
 from parlant.core.context_variables import ContextVariable, ContextVariableValue
@@ -88,7 +89,7 @@ class Interaction:
     @staticmethod
     def empty() -> Interaction:
         """Returns an empty interaction state"""
-        return Interaction(history=[])
+        return Interaction(events=[])
 
     @property
     def messages(self) -> Sequence[InteractionMessage]:
@@ -101,28 +102,43 @@ class Interaction:
                 content=cast(MessageEventData, event.data)["message"],
                 creation_utc=event.creation_utc,
             )
-            for event in self.history
+            for event in self.events
             if event.kind == EventKind.MESSAGE
         ]
 
     @property
     def last_customer_message(self) -> Optional[InteractionMessage]:
         """Returns the last customer message in the interaction session, if it exists"""
-        for event in reversed(self.history):
-            if event.kind == EventKind.MESSAGE and event.source == EventSource.CUSTOMER:
-                message_data = cast(MessageEventData, event.data)
+        if event := self.last_customer_message_event:
+            message_data = cast(MessageEventData, event.data)
 
-                return InteractionMessage(
-                    source=event.source,
-                    participant=message_data["participant"],
-                    trace_id=event.trace_id,
-                    content=message_data["message"],
-                    creation_utc=event.creation_utc,
-                )
+            return InteractionMessage(
+                source=event.source,
+                participant=message_data["participant"],
+                trace_id=event.trace_id,
+                content=message_data["message"],
+                creation_utc=event.creation_utc,
+            )
+
         return None
 
-    history: Sequence[Event]
+    @property
+    def last_customer_message_event(self) -> Optional[Event]:
+        """Returns the last customer message in the interaction session, if it exists"""
+        for event in reversed(self.events):
+            if event.kind == EventKind.MESSAGE and event.source == EventSource.CUSTOMER:
+                return event
+
+        return None
+
+    events: Sequence[Event]
     """An sequenced event-by-event representation of the interaction"""
+
+    @property
+    @deprecated("Use the events property instead")
+    def history(self) -> Sequence[Event]:
+        """Returns a string representation of the interaction history"""
+        return self.events
 
 
 @dataclass(frozen=False)
@@ -141,6 +157,7 @@ class ResponseState:
     tool_insights: ToolInsights
     prepared_to_respond: bool
     message_events: list[EmittedEvent]
+    additional_canned_response_fields: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ordinary_guidelines(self) -> list[Guideline]:
@@ -197,6 +214,9 @@ class EngineContext:
 
     state: ResponseState
     """The current state of the response being processed"""
+
+    creation: Stopwatch = field(default_factory=Stopwatch.start)
+    """A stopwatch that was started when the context was created"""
 
     async def add_tool_event(
         self,

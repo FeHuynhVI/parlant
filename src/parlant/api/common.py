@@ -17,6 +17,7 @@ from enum import Enum
 from pydantic import Field
 from typing import Annotated, Any, Mapping, Sequence, TypeAlias
 
+from parlant.core.agents import CompositionMode
 from parlant.core.common import DefaultBaseModel
 from parlant.core.evaluations import PayloadOperation
 from parlant.core.persistence.common import SortDirection
@@ -24,6 +25,51 @@ from parlant.core.relationships import RelationshipId
 from parlant.core.guidelines import GuidelineId
 from parlant.core.tags import TagId
 from parlant.core.tools import Tool, ToolParameterDescriptor
+
+
+class CompositionModeDTO(Enum):
+    """
+    Defines the composition mode for an entity.
+
+    Available options:
+    - fluid
+    - canned_fluid
+    - composited_canned
+    - strict_canned
+    """
+
+    FLUID = "fluid"
+    CANNED_FLUID = "canned_fluid"
+    CANNED_COMPOSITED = "composited_canned"
+    CANNED_STRICT = "strict_canned"
+
+
+def composition_mode_dto_to_composition_mode(dto: CompositionModeDTO) -> CompositionMode:
+    """Convert CompositionModeDTO to core CompositionMode."""
+    match dto:
+        case CompositionModeDTO.FLUID:
+            return CompositionMode.FLUID
+        case CompositionModeDTO.CANNED_STRICT:
+            return CompositionMode.CANNED_STRICT
+        case CompositionModeDTO.CANNED_COMPOSITED:
+            return CompositionMode.CANNED_COMPOSITED
+        case CompositionModeDTO.CANNED_FLUID:
+            return CompositionMode.CANNED_FLUID
+
+
+def composition_mode_to_composition_mode_dto(
+    composition_mode: CompositionMode,
+) -> CompositionModeDTO:
+    """Convert core CompositionMode to CompositionModeDTO."""
+    match composition_mode:
+        case CompositionMode.FLUID:
+            return CompositionModeDTO.FLUID
+        case CompositionMode.CANNED_STRICT:
+            return CompositionModeDTO.CANNED_STRICT
+        case CompositionMode.CANNED_COMPOSITED:
+            return CompositionModeDTO.CANNED_COMPOSITED
+        case CompositionMode.CANNED_FLUID:
+            return CompositionModeDTO.CANNED_FLUID
 
 
 def apigen_config(group_name: str, method_name: str) -> Mapping[str, Any]:
@@ -88,6 +134,25 @@ GuidelineDescriptionField: TypeAlias = Annotated[
     Field(
         description="Optional description providing additional context for the guideline",
         examples=["This applies only to premium customers with active subscriptions."],
+    ),
+]
+
+
+class CriticalityDTO(Enum):
+    """
+    The criticality level of a guideline.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+GuidelineCriticalityField: TypeAlias = Annotated[
+    CriticalityDTO,
+    Field(
+        description="The criticality level of the guideline",
+        examples=["high"],
     ),
 ]
 
@@ -205,6 +270,7 @@ guideline_dto_example = {
     "enabled": True,
     "tags": ["tag1", "tag2"],
     "metadata": {"key1": "value1", "key2": "value2"},
+    "composition_mode": None,
 }
 
 GuidelineTagsField: TypeAlias = Annotated[
@@ -226,9 +292,11 @@ class GuidelineDTO(
     condition: GuidelineConditionField
     action: GuidelineActionField | None = None
     description: GuidelineDescriptionField | None = None
+    criticality: GuidelineCriticalityField = CriticalityDTO.MEDIUM
     enabled: GuidelineEnabledField = True
     tags: GuidelineTagsField
     metadata: GuidelineMetadataField
+    composition_mode: CompositionModeDTO | None = None
 
 
 EnumValueTypeDTO: TypeAlias = str | int

@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Mapping, Sequence, cast
 
-from parlant.core.agents import AgentId, AgentStore
-from parlant.core.common import ItemNotFoundError, JSONSerializable, UniqueId
+from parlant.core.agents import AgentId, AgentStore, CompositionMode
+from parlant.core.common import Criticality, ItemNotFoundError, JSONSerializable, UniqueId
 from parlant.core.guideline_tool_associations import (
     GuidelineToolAssociation,
     GuidelineToolAssociationStore,
@@ -84,10 +84,12 @@ class GuidelineModule:
         condition: str,
         action: str | None,
         description: str | None,
+        criticality: Criticality | None,
         metadata: Mapping[str, JSONSerializable] | None,
         enabled: bool | None,
         tags: Sequence[TagId] | None,
         id: GuidelineId | None = None,
+        composition_mode: CompositionMode | None = None,
     ) -> Guideline:
         if tags:
             for tag_id in tags:
@@ -99,10 +101,12 @@ class GuidelineModule:
             condition=condition,
             action=action,
             description=description,
+            criticality=criticality,
             metadata=metadata or {},
             enabled=enabled or True,
             tags=tags,
             id=id,
+            composition_mode=composition_mode,
         )
 
         return guideline
@@ -130,14 +134,23 @@ class GuidelineModule:
         condition: str | None,
         action: str | None,
         description: str | None,
+        criticality: Criticality | None,
         tool_associations: GuidelineToolAssociationUpdateParams | None,
         enabled: bool | None,
         tags: GuidelineTagsUpdateParams | None,
         metadata: GuidelineMetadataUpdateParams | None,
+        composition_mode: CompositionMode | None = None,
     ) -> Guideline:
         _ = await self._guideline_store.read_guideline(guideline_id=guideline_id)
 
-        if condition or action or description is not None or enabled is not None:
+        if (
+            condition
+            or action
+            or description is not None
+            or criticality is not None
+            or enabled is not None
+            or composition_mode is not None
+        ):
             update_params: GuidelineUpdateParams = {}
             if condition:
                 update_params["condition"] = condition
@@ -145,8 +158,12 @@ class GuidelineModule:
                 update_params["action"] = action
             if description is not None:
                 update_params["description"] = description
+            if criticality is not None:
+                update_params["criticality"] = criticality
             if enabled is not None:
                 update_params["enabled"] = enabled
+            if composition_mode is not None:
+                update_params["composition_mode"] = composition_mode
 
             await self._guideline_store.update_guideline(
                 guideline_id=guideline_id,

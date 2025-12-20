@@ -10,6 +10,7 @@ All notable changes to Parlant will be documented here.
 - Add Snowflake Cortex service
 - Add GLM service
 - Add Mistral service
+- Add OpenRouter service
 - Add /healthz endpoint
 - Add .current propoerty for Server, Agent, and Customer in SDK
 - Support proxy URL for LiteLLM
@@ -31,7 +32,25 @@ All notable changes to Parlant will be documented here.
 - Allow specifying custom IDs when creating guidelines via SDK and API
 - Allow specifying custom IDs when creating glossary via SDK and API
 - Add Qdrant VectorDatabase adapter
+- Fix critical bug with cancellation during response analysis
+- Fix critical similarity calculation error in TransientVectorDatabase
+- Add guideline criticality level
+- Add ability to configure and extend the FastAPI app object
+- Add dynamic composition mode
+- Support adding custom canrep fields to matched guidelines and journey states
 
+## [3.0.4] - 2025-11-18
+
+### Fixed
+
+- Fix bug where NanoDB query failed when no filters matched
+- Extend tool insights across iterations
+- Fix deprecated status.HTTP_422_UNPROCESSABLE_ENTITY to status.HTTP_422_UNPROCESSABLE_CONTENT
+- Fix broken CLI by adding missing websocket-client dependency
+- Added specific classes for embedder initialisation
+- Make base url once in OllamaEmbedder
+- Update dependencies for security, upgrade FastAPI, fix mypy in hugging_face.py
+- Bump torch for fixing vulnerability
 
 ## [3.0.3] - 2025-10-23
 

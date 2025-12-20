@@ -22,6 +22,8 @@ from typing_extensions import override
 
 import logging
 
+from parlant.core.tracer import Tracer
+
 orig_basicConfig = logging.basicConfig
 orig_getLogger = logging.getLogger
 
@@ -64,11 +66,11 @@ from parlant.core.loggers import Logger
 from parlant.core.persistence.common import ensure_is_total, matches_filters, Where
 from parlant.core.persistence.vector_database import (
     BaseDocument,
+    BaseVectorCollection,
     DeleteResult,
     InsertResult,
     SimilarDocumentResult,
     UpdateResult,
-    VectorCollection,
     VectorDatabase,
     TDocument,
 )
@@ -78,10 +80,12 @@ class TransientVectorDatabase(VectorDatabase):
     def __init__(
         self,
         logger: Logger,
+        tracer: Tracer,
         embedder_factory: EmbedderFactory,
         embedding_cache_provider: EmbeddingCacheProvider,
     ) -> None:
         self._logger = logger
+        self._tracer = tracer
         self._embedder_factory = embedder_factory
         self._embedding_cache_provider = embedding_cache_provider
 
@@ -105,6 +109,7 @@ class TransientVectorDatabase(VectorDatabase):
 
         self._collections[name] = TransientVectorCollection(
             self._logger,
+            self._tracer,
             nano_db=self._databases[name],
             name=name,
             schema=schema,
@@ -145,6 +150,7 @@ class TransientVectorDatabase(VectorDatabase):
 
         self._collections[name] = TransientVectorCollection(
             self._logger,
+            self._tracer,
             nano_db=self._databases[name],
             name=name,
             schema=schema,
@@ -182,14 +188,15 @@ class TransientVectorDatabase(VectorDatabase):
     @override
     async def read_metadata(
         self,
-    ) -> dict[str, JSONSerializable]:
+    ) -> Mapping[str, JSONSerializable]:
         return self._metadata
 
 
-class TransientVectorCollection(Generic[TDocument], VectorCollection[TDocument]):
+class TransientVectorCollection(Generic[TDocument], BaseVectorCollection[TDocument]):
     def __init__(
         self,
         logger: Logger,
+        tracer: Tracer,
         nano_db: nano_vectordb.NanoVectorDB,
         name: str,
         schema: type[TDocument],
@@ -197,6 +204,7 @@ class TransientVectorCollection(Generic[TDocument], VectorCollection[TDocument])
         embedding_cache_provider: EmbeddingCacheProvider,
     ) -> None:
         self._logger = logger
+        self._tracer = tracer
         self._name = name
         self._schema = schema
         self._embedder = embedder
@@ -348,16 +356,17 @@ class TransientVectorCollection(Generic[TDocument], VectorCollection[TDocument])
             deleted_document=None,
         )
 
-    async def find_similar_documents(
+    async def do_find_similar_documents(
         self,
         filters: Where,
         query: str,
         k: int,
+        hints: Mapping[str, Any] = {},
     ) -> Sequence[SimilarDocumentResult[TDocument]]:
         if not self._documents:
             return []
 
-        query_embeddings = list((await self._embedder.embed([query])).vectors)
+        query_embeddings = list((await self._embedder.embed([query], hints)).vectors)
         vector = np.array(query_embeddings[0], dtype=np.float32)
 
         keys_to_exclude = {"__id__", "__metrics__"}
@@ -365,31 +374,30 @@ class TransientVectorCollection(Generic[TDocument], VectorCollection[TDocument])
         if await self.find(filters) == []:
             return []
 
-        docs = [
-            {key: value for key, value in d.items() if key not in keys_to_exclude}
-            for d in self._nano_db.query(
-                query=vector,
-                top_k=k,
-                filter_lambda=self._build_filter_lambda(filters),
+        query_result = self._nano_db.query(
+            query=vector,
+            top_k=len(self._documents),
+            filter_lambda=self._build_filter_lambda(filters),
+        )
+
+        docs_and_similarities = [
+            (
+                {key: value for key, value in d.items() if key not in keys_to_exclude},
+                float(d["__metrics__"]),
             )
+            for d in query_result
         ]
 
-        self._logger.trace(f"Similar documents found\n{json.dumps(docs, indent=2)}")
+        self._logger.trace(
+            f"Similar documents found\n{json.dumps(docs_and_similarities[0], indent=2)}"
+        )
 
-        # FIXME: Distances here are fake (rank → normalized 0–0.8).
-        # Proper cosine distance should be computed.
-        # Currently NanoDB doesn’t return similarity scores or embeddings, so
-        # this is only a placeholder for ordering. Replace once real scores
-        # are implemented in the database client.
-        n = len(docs)
-
-        def distance_formula(i: int) -> float:
-            return ((i / (n - 1)) * 0.8) if n > 1 else 0.8
-
-        return [
+        results = [
             SimilarDocumentResult(
                 document=cast(TDocument, d),
-                distance=distance_formula(i),
+                distance=1 - abs(sim),
             )
-            for i, d in enumerate(docs)
+            for d, sim in docs_and_similarities
         ]
+
+        return results

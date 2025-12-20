@@ -30,6 +30,7 @@ from huggingface_hub.errors import (  # type: ignore
 from tempfile import gettempdir
 
 from parlant.core.loggers import Logger
+from parlant.core.tracer import Tracer
 from parlant.core.meter import Meter
 from parlant.core.nlp.policies import policy, retry
 from parlant.core.nlp.tokenization import EstimatingTokenizer
@@ -111,8 +112,8 @@ class HuggingFaceEstimatingTokenizer(EstimatingTokenizer):
 
 
 class HuggingFaceEmbedder(BaseEmbedder):
-    def __init__(self, logger: Logger, meter: Meter, model_name: str) -> None:
-        super().__init__(logger=logger, meter=meter, model_name=model_name)
+    def __init__(self, logger: Logger, tracer: Tracer, meter: Meter, model_name: str) -> None:
+        super().__init__(logger=logger, tracer=tracer, meter=meter, model_name=model_name)
 
         self._model = _create_auto_model(model_name)
         self._tokenizer = HuggingFaceEstimatingTokenizer(model_name=model_name)
@@ -163,10 +164,11 @@ class HuggingFaceEmbedder(BaseEmbedder):
 
 
 class JinaAIEmbedder(HuggingFaceEmbedder):
-    def __init__(self, logger: Logger, meter: Meter) -> None:
+    def __init__(self, logger: Logger, tracer: Tracer, meter: Meter) -> None:
         super().__init__(
             logger=logger,
             meter=meter,
+            tracer=tracer,
             model_name="jinaai/jina-embeddings-v3",
         )
 
@@ -177,10 +179,11 @@ class JinaAIEmbedder(HuggingFaceEmbedder):
 
 
 class AITeamVNAIEmbedder(HuggingFaceEmbedder):
-    def __init__(self, logger: Logger, meter: Meter) -> None:
+    def __init__(self, logger: Logger, tracer: Tracer, meter: Meter) -> None:
         super().__init__(
             logger=logger,
             meter=meter,
+            tracer=tracer,
             model_name="AITeamVN/Vietnamese_Embedding_v2"
         )
 

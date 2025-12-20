@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from itertools import chain
 from random import shuffle
 import re
@@ -28,7 +28,7 @@ import traceback
 from typing import Any, Iterable, Mapping, Optional, Sequence, cast
 from typing_extensions import override
 
-from parlant.core.async_utils import safe_gather
+from parlant.core.async_utils import Stopwatch, safe_gather, CancellationSuppressionLatch
 from parlant.core.capabilities import Capability
 from parlant.core.meter import DurationHistogram, Meter
 from parlant.core.tracer import Tracer
@@ -69,10 +69,11 @@ from parlant.core.sessions import (
     EventSource,
     MessageEventData,
     Participant,
+    Session,
     ToolCall,
     ToolEventData,
 )
-from parlant.core.common import CancellationSuppressionLatch, DefaultBaseModel, JSONSerializable
+from parlant.core.common import DefaultBaseModel, JSONSerializable
 from parlant.core.loggers import Logger
 from parlant.core.shots import Shot, ShotCollection
 from parlant.core.tools import ToolId
@@ -154,15 +155,17 @@ class _CannedResponseRenderResult:
 class _CannedResponseSelectionResult:
     message: str
     draft: str | None
-    rendered_canned_responses: Sequence[tuple[CannedResponseId, str]]
+    rendered_canned_responses: Sequence[tuple[CannedResponse, str]]
     chosen_canned_responses: list[tuple[CannedResponseId, str]]
 
 
 @dataclass
 class CannedResponseContext:
+    start_of_processing: Stopwatch
     event_emitter: EventEmitter
     agent: Agent
     customer: Customer
+    session: Session
     context_variables: Sequence[tuple[ContextVariable, ContextVariableValue]]
     interaction_history: Sequence[Event]
     terms: Sequence[Term]
@@ -173,6 +176,7 @@ class CannedResponseContext:
     tool_insights: ToolInsights
     staged_tool_events: Sequence[EmittedEvent]
     staged_message_events: Sequence[EmittedEvent]
+    additional_canned_response_fields: Mapping[str, Any] = dataclass_field(default_factory=dict)
 
     @property
     def guideline_matches(self) -> Sequence[GuidelineMatch]:
@@ -261,6 +265,21 @@ class ToolBasedFieldExtraction(CannedResponseFieldExtractionMethod):
         return False, None
 
 
+class AdditionalFieldExtraction(CannedResponseFieldExtractionMethod):
+    """Extracts fields from additional_canned_response_fields (e.g., from guideline field providers)."""
+
+    @override
+    async def extract(
+        self,
+        canned_response: str,
+        field_name: str,
+        context: CannedResponseContext,
+    ) -> tuple[bool, JSONSerializable]:
+        if field_name in context.additional_canned_response_fields:
+            return True, context.additional_canned_response_fields[field_name]
+        return False, None
+
+
 class CannedResponseFieldExtractionSchema(DefaultBaseModel):
     field_name: Optional[str] = None
     field_value: Optional[str] = None
@@ -340,7 +359,7 @@ class GenerativeFieldExtraction(CannedResponseFieldExtractionMethod):
         )
 
         builder.add_agent_identity(context.agent)
-        builder.add_customer_identity(context.customer)
+        builder.add_customer_identity(context.customer, context.session)
         builder.add_context_variables(context.context_variables)
 
         all_guideline_matches = list(
@@ -432,11 +451,13 @@ class CannedResponseFieldExtractor(ABC):
         self,
         standard: StandardFieldExtraction,
         tool_based: ToolBasedFieldExtraction,
+        additional: AdditionalFieldExtraction,
         generative: GenerativeFieldExtraction,
     ) -> None:
         self.methods: list[CannedResponseFieldExtractionMethod] = [
             standard,
             tool_based,
+            additional,
             generative,
         ]
 
@@ -506,6 +527,8 @@ class CannedResponseGenerator(MessageEventComposer):
         self._entity_queries = entity_queries
         self._no_match_provider = no_match_provider
         self._follow_ups_enabled = True
+        self.candidate_similarity_threshold = 0.4
+
         self._define_histograms()
 
     def _define_histograms(self) -> None:
@@ -548,6 +571,45 @@ class CannedResponseGenerator(MessageEventComposer):
             name="selection",
             description="Duration of canned response selection in milliseconds",
         )
+        self._hist_ttfm_duration = _create_histogram(
+            name="ttfm",
+            description="Time to first message generated in milliseconds",
+        )
+
+    async def _resolve_composition_mode(self, context: EngineContext) -> CompositionMode:
+        """Resolve effective composition mode from matched guidelines.
+
+        Most restrictive rule: CANNED_STRICT > CANNED_COMPOSITED > CANNED_FLUID
+        """
+        if context.agent.composition_mode == CompositionMode.CANNED_STRICT:
+            return CompositionMode.CANNED_STRICT
+
+        restrictiveness_priority = {
+            CompositionMode.CANNED_STRICT: 3,
+            CompositionMode.CANNED_COMPOSITED: 2,
+            CompositionMode.CANNED_FLUID: 1,
+        }
+
+        most_restrictive_mode: CompositionMode | None = None
+        max_restrictiveness = 0
+
+        # Check all matched guidelines for composition mode
+        for guideline in context.state.guidelines:
+            if guideline.composition_mode is not None:
+                mode = guideline.composition_mode
+
+                # Track most restrictive (only CANNED_* modes)
+                if mode in restrictiveness_priority:
+                    restrictiveness = restrictiveness_priority[mode]
+                    if restrictiveness > max_restrictiveness:
+                        most_restrictive_mode = mode
+                        max_restrictiveness = restrictiveness
+
+        # Default to agent's composition mode
+        if most_restrictive_mode is None:
+            most_restrictive_mode = context.agent.composition_mode
+
+        return most_restrictive_mode
 
     async def draft_generation_shots(
         self, composition_mode: CompositionMode
@@ -572,12 +634,17 @@ class CannedResponseGenerator(MessageEventComposer):
     ) -> Sequence[MessageEventComposition]:
         agent = context.agent
 
+        # Resolve effective composition mode
+        composition_mode = await self._resolve_composition_mode(context)
+
         canrep_context = CannedResponseContext(
+            start_of_processing=context.creation,
             event_emitter=context.session_event_emitter,
             agent=agent,
             customer=context.customer,
+            session=context.session,
             context_variables=context.state.context_variables,
-            interaction_history=context.interaction.history,
+            interaction_history=context.interaction.events,
             terms=list(context.state.glossary_terms),
             ordinary_guideline_matches=context.state.ordinary_guideline_matches,
             tool_enabled_guideline_matches=context.state.tool_enabled_guideline_matches,
@@ -586,6 +653,7 @@ class CannedResponseGenerator(MessageEventComposer):
             tool_insights=context.state.tool_insights,
             staged_tool_events=context.state.tool_events,
             staged_message_events=context.state.message_events,
+            additional_canned_response_fields=context.state.additional_canned_response_fields,
         )
 
         prompt_builder = PromptBuilder(
@@ -599,7 +667,7 @@ class CannedResponseGenerator(MessageEventComposer):
         preamble_responses: Sequence[CannedResponse] = []
         preamble_choices: list[str] = []
 
-        if agent.composition_mode != CompositionMode.CANNED_STRICT:
+        if composition_mode != CompositionMode.CANNED_STRICT:
             preamble_choices = [
                 "Hey there!",
                 "Just a moment.",
@@ -681,7 +749,7 @@ You will now be given the current state of the interaction to which you must gen
 """,
             props={
                 "composition_mode_specific_instructions": instructions,
-                "composition_mode": agent.composition_mode,
+                "composition_mode": composition_mode,
                 "preamble_choices": preamble_choices,
             },
         )
@@ -707,7 +775,7 @@ You will now be given the current state of the interaction to which you must gen
             f"Canned Response Preamble Completion:\n{canrep.content.model_dump_json(indent=2)}"
         )
 
-        if agent.composition_mode == CompositionMode.CANNED_STRICT:
+        if composition_mode == CompositionMode.CANNED_STRICT:
             if canrep.content.preamble not in preamble_choices:
                 self._logger.error(
                     f"Selected preamble '{canrep.content.preamble}' is not in the list of available preamble canned_responses."
@@ -717,7 +785,7 @@ You will now be given the current state of the interaction to which you must gen
         if await self._hooks.call_on_preamble_generated(context, payload=canrep.content.preamble):
             # If we're in, the hook did not bail out.
 
-            emitted_event = await canrep_context.event_emitter.emit_message_event(
+            handle = await canrep_context.event_emitter.emit_message_event(
                 trace_id=self._tracer.trace_id,
                 data=MessageEventData(
                     message=canrep.content.preamble,
@@ -726,10 +794,12 @@ You will now be given the current state of the interaction to which you must gen
                 ),
             )
 
+            self._tracer.add_event("canrep.preamble_generated")
+
             return [
                 MessageEventComposition(
                     generation_info={"message": canrep.info},
-                    events=[emitted_event],
+                    events=[handle.event],
                 )
             ]
 
@@ -739,7 +809,7 @@ You will now be given the current state of the interaction to which you must gen
     async def generate_response(
         self,
         context: EngineContext,
-        latch: Optional[CancellationSuppressionLatch] = None,
+        latch: Optional[CancellationSuppressionLatch[None]] = None,
     ) -> Sequence[MessageEventComposition]:
         with self._logger.scope("MessageEventComposer"):
             with self._logger.scope("CannedResponseGenerator"):
@@ -801,6 +871,7 @@ You will now be given the current state of the interaction to which you must gen
         )
 
         fields_available_in_context.extend(("std", "generative"))
+        fields_available_in_context.extend(context.additional_canned_response_fields.keys())
 
         relevant_responses = []
 
@@ -827,8 +898,11 @@ You will now be given the current state of the interaction to which you must gen
     async def _do_generate_events(
         self,
         loaded_context: EngineContext,
-        latch: Optional[CancellationSuppressionLatch] = None,
+        latch: Optional[CancellationSuppressionLatch[None]] = None,
     ) -> Sequence[MessageEventComposition]:
+        # Resolve effective composition mode
+        composition_mode = await self._resolve_composition_mode(loaded_context)
+
         is_first_message_emitted = False
 
         async def output_messages(
@@ -838,6 +912,7 @@ You will now be given the current state of the interaction to which you must gen
             emitted_events: list[EmittedEvent] = []
             if generation_result is not None:
                 policy = self._perceived_performance_policy_provider.get_policy(context.agent.id)
+                event_metadata = get_canrep_metadata(generation_result)
 
                 if await policy.is_message_splitting_required(
                     loaded_context, generation_result.message
@@ -852,7 +927,7 @@ You will now be given the current state of the interaction to which you must gen
                     if await self._hooks.call_on_message_generated(loaded_context, payload=m):
                         # If we're in, the hook did not bail out.
 
-                        event = await event_emitter.emit_message_event(
+                        handle = await event_emitter.emit_message_event(
                             trace_id=self._tracer.trace_id,
                             data=MessageEventData(
                                 message=m,
@@ -865,12 +940,16 @@ You will now be given the current state of the interaction to which you must gen
                                 message=m,
                                 participant=Participant(id=agent.id, display_name=agent.name),
                             ),
+                            metadata=event_metadata,
                         )
                         if not is_first_message_emitted:
+                            await self._hist_ttfm_duration.record(
+                                context.start_of_processing.elapsed * 1000
+                            )
                             self._tracer.add_event("canrep.ttfm")
                             is_first_message_emitted = True
 
-                        emitted_events.append(event)
+                        emitted_events.append(handle.event)
 
                         await context.event_emitter.emit_status_event(
                             trace_id=self._tracer.trace_id,
@@ -932,11 +1011,30 @@ You will now be given the current state of the interaction to which you must gen
                         )
             return emitted_events
 
+        def get_canrep_metadata(
+            generation_result: _CannedResponseSelectionResult,
+        ) -> Mapping[str, JSONSerializable] | None:
+            if not generation_result.chosen_canned_responses:
+                return None
+
+            chosen_canrep = next(
+                iter(
+                    canrep
+                    for canrep, _ in generation_result.rendered_canned_responses
+                    if generation_result.chosen_canned_responses[0][0] == canrep.id
+                ),
+                None,
+            )
+            metadata = chosen_canrep.metadata if chosen_canrep else {}
+
+            return metadata
+
         event_emitter = loaded_context.session_event_emitter
         agent = loaded_context.agent
         customer = loaded_context.customer
+        session = loaded_context.session
         context_variables = loaded_context.state.context_variables
-        interaction_history = loaded_context.interaction.history
+        interaction_history = loaded_context.interaction.events
         terms = list(loaded_context.state.glossary_terms)
         ordinary_guideline_matches = loaded_context.state.ordinary_guideline_matches
         journeys = loaded_context.state.journeys
@@ -945,6 +1043,7 @@ You will now be given the current state of the interaction to which you must gen
         tool_insights = loaded_context.state.tool_insights
         staged_tool_events = loaded_context.state.tool_events
         staged_message_events = loaded_context.state.message_events
+        additional_canned_response_fields = loaded_context.state.additional_canned_response_fields
 
         if (
             not interaction_history
@@ -957,9 +1056,11 @@ You will now be given the current state of the interaction to which you must gen
             return []
 
         context = CannedResponseContext(
+            start_of_processing=loaded_context.creation,
             event_emitter=event_emitter,
             agent=agent,
             customer=customer,
+            session=session,
             context_variables=context_variables,
             interaction_history=interaction_history,
             terms=terms,
@@ -970,6 +1071,7 @@ You will now be given the current state of the interaction to which you must gen
             tool_insights=tool_insights,
             staged_tool_events=staged_tool_events,
             staged_message_events=staged_message_events,
+            additional_canned_response_fields=additional_canned_response_fields,
         )
 
         canreps = await self._get_relevant_canned_responses(context)
@@ -991,7 +1093,7 @@ You will now be given the current state of the interaction to which you must gen
                     loaded_context,
                     context,
                     canreps,
-                    agent.composition_mode,
+                    composition_mode,
                     temperature=follow_up_selection_attempt_temperatures[generation_attempt],
                 )
 
@@ -1174,6 +1276,7 @@ Example {i} - {shot.description}: ###
         self,
         agent: Agent,
         customer: Customer,
+        session: Session,
         context_variables: Sequence[tuple[ContextVariable, ContextVariableValue]],
         interaction_history: Sequence[Event],
         terms: Sequence[Term],
@@ -1210,7 +1313,7 @@ Later in this prompt, you'll be provided with behavioral guidelines and other co
         )
 
         builder.add_agent_identity(agent)
-        builder.add_customer_identity(customer)
+        builder.add_customer_identity(customer, session)
         builder.add_section(
             name="canned-response-generator-draft-task-description",
             template="""
@@ -1472,7 +1575,7 @@ Produce a valid JSON object according to the following spec. Use the values prov
         self,
         context: CannedResponseContext,
         draft_message: str,
-        canned_responses: Sequence[tuple[CannedResponseId, str]],
+        canned_responses: Sequence[tuple[CannedResponse, str]],
     ) -> PromptBuilder:
         builder = PromptBuilder(
             on_build=lambda prompt: self._logger.trace(
@@ -1481,7 +1584,7 @@ Produce a valid JSON object according to the following spec. Use the values prov
         )
 
         formatted_canreps = "\n".join(
-            [f'Template ID: {canrep[0]} """\n{canrep[1]}\n"""' for canrep in canned_responses]
+            [f'Template ID: {canrep[0].id} """\n{canrep[1]}\n"""' for canrep in canned_responses]
         )
 
         builder.add_section(
@@ -1499,7 +1602,7 @@ Produce a valid JSON object according to the following spec. Use the values prov
         )
 
         builder.add_agent_identity(context.agent)
-        builder.add_customer_identity(context.customer)
+        builder.add_customer_identity(context.customer, context.session)
         builder.add_glossary(context.terms)
         builder.add_interaction_history_for_message_generation(
             context.interaction_history,
@@ -1551,7 +1654,7 @@ Output a JSON object with three properties:
     ) -> tuple[Mapping[str, GenerationInfo], Optional[_CannedResponseSelectionResult]]:
         # This will be needed throughout the process for emitting status events
         direct_draft_output_mode = (
-            not canned_responses and context.agent.composition_mode != CompositionMode.CANNED_STRICT
+            not canned_responses and composition_mode != CompositionMode.CANNED_STRICT
         )
 
         # Step 1: Generate the draft message
@@ -1559,6 +1662,7 @@ Output a JSON object with three properties:
             agent=context.agent,
             context_variables=context.context_variables,
             customer=context.customer,
+            session=context.session,
             interaction_history=context.interaction_history,
             terms=context.terms,
             ordinary_guideline_matches=context.ordinary_guideline_matches,
@@ -1568,7 +1672,7 @@ Output a JSON object with three properties:
             staged_tool_events=context.staged_tool_events,
             staged_message_events=context.staged_message_events,
             tool_insights=context.tool_insights,
-            shots=await self.draft_generation_shots(context.agent.composition_mode),
+            shots=await self.draft_generation_shots(composition_mode),
         )
 
         if direct_draft_output_mode:
@@ -1579,9 +1683,7 @@ Output a JSON object with three properties:
                     "data": {},
                 },
             )
-        elif (
-            not canned_responses and context.agent.composition_mode == CompositionMode.CANNED_STRICT
-        ):
+        elif not canned_responses and composition_mode == CompositionMode.CANNED_STRICT:
             no_match_canrep = await self._no_match_provider.get_response(loaded_context, None)
 
             return {}, _CannedResponseSelectionResult(
@@ -1647,13 +1749,16 @@ Output a JSON object with three properties:
 
         # Step 2: Select the most relevant canned response templates based on the draft message
         async with self._hist_retrieval_duration.measure():
+            relevance_scores = await self._canned_response_store.filter_relevant_canned_responses(
+                query=draft_message,
+                available_canned_responses=canned_responses,
+                max_count=30,
+            )
+
             relevant_canreps = set(
                 r.canned_response
-                for r in await self._canned_response_store.filter_relevant_canned_responses(
-                    query=draft_message,
-                    available_canned_responses=canned_responses,
-                    max_count=30,
-                )
+                for r in relevance_scores
+                if r.score >= self.candidate_similarity_threshold
             )
 
             # Filtering based on similarity will have taken out all transient
@@ -1668,10 +1773,24 @@ Output a JSON object with three properties:
                 )
             )
 
+            if not relevant_canreps and composition_mode != CompositionMode.CANNED_STRICT:
+                self._logger.debug(
+                    "Skipping canned response selection; no relevant canned responses found"
+                )
+
+                return {
+                    "draft": draft_response.info,
+                }, _CannedResponseSelectionResult(
+                    message=draft_message,
+                    draft=None,
+                    rendered_canned_responses=[],
+                    chosen_canned_responses=[],
+                )
+
         # Step 3: Pre-render these templates so that matching works better
         async with self._hist_render_duration.measure():
             rendered_canreps = [
-                (r.response.id, str(r.rendered_text))
+                (r.response, str(r.rendered_text))
                 for r in await self._render_responses(
                     context=context,
                     responses=relevant_canreps,
@@ -1770,7 +1889,7 @@ Output a JSON object with three properties:
         # Step 5.3: Assuming a high-quality match or a partial match in strict mode
         selected_canrep_id = CannedResponseId(selection_response.content.chosen_template_id)
         rendered_canned_response = next(
-            (value for crid, value in rendered_canreps if crid == selected_canrep_id),
+            (value for canrep, value in rendered_canreps if canrep.id == selected_canrep_id),
             None,
         )
 
@@ -1887,7 +2006,7 @@ You are given two message types:
 The draft message contains what should be said right now.
 The style reference messages teach you what communication style to try to copy.
 
-You must say what the draft message says, but capture the tone and style of the style reference messages precisely.
+You must say what the draft message says, but capture the tone, style, and choice of words in the reference messages as precisely as you can.
 
 Make sure NOT to add, remove, or hallucinate information nor add or remove key words (nouns, verbs) to the message.
 
@@ -2055,7 +2174,7 @@ EXAMPLES
         )
 
         builder.add_agent_identity(context.agent)
-        builder.add_customer_identity(context.customer)
+        builder.add_customer_identity(context.customer, context.session)
         builder.add_interaction_history(
             context.interaction_history,
             staged_events=context.staged_message_events,
@@ -2124,18 +2243,18 @@ Output a JSON object with three properties:
 
         try:
             outputted_canreps_ids = [
-                crid for (crid, canrep) in last_response_generation.chosen_canned_responses
+                cid for cid, value in last_response_generation.chosen_canned_responses
             ]
 
-            filtered_rendered_canreps: Sequence[tuple[CannedResponseId, str]] = [
-                (cid, canrep)
-                for cid, canrep in last_response_generation.rendered_canned_responses
-                if cid not in outputted_canreps_ids
+            filtered_rendered_canreps: Sequence[tuple[CannedResponse, str]] = [
+                (canrep, value)
+                for canrep, value in last_response_generation.rendered_canned_responses
+                if canrep.id not in outputted_canreps_ids
             ]  # removes outputted response/s
 
             chronological_id_rendered_canreps = {
-                str(i): (cid, canrep)
-                for i, (cid, canrep) in enumerate(filtered_rendered_canreps, start=1)
+                str(i): (canrep, value)
+                for i, (canrep, value) in enumerate(filtered_rendered_canreps, start=1)
             }
 
             prompt = self._build_follow_up_canned_response_prompt(
@@ -2174,7 +2293,7 @@ Output a JSON object with three properties:
                         message=chosen_canrep[1],
                         draft=response.content.remaining_message_draft,
                         rendered_canned_responses=filtered_rendered_canreps,
-                        chosen_canned_responses=[chosen_canrep],
+                        chosen_canned_responses=[(chosen_canrep[0].id, chosen_canrep[1])],
                     )
                     if chosen_canrep
                     else None

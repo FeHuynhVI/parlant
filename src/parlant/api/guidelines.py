@@ -19,6 +19,7 @@ from pydantic import Field
 from parlant.api import common
 from parlant.api.authorization import Operation, AuthorizationPolicy
 from parlant.api.common import (
+    CompositionModeDTO,
     GuidelineDTO,
     GuidelineEnabledField,
     GuidelineIdField,
@@ -29,6 +30,8 @@ from parlant.api.common import (
     TagDTO,
     ToolIdDTO,
     apigen_config,
+    composition_mode_dto_to_composition_mode,
+    composition_mode_to_composition_mode_dto,
     guideline_dto_example,
 )
 from parlant.core.app_modules.guidelines import (
@@ -39,6 +42,7 @@ from parlant.core.app_modules.guidelines import (
 )
 from parlant.core.application import Application
 from parlant.core.common import (
+    Criticality,
     DefaultBaseModel,
 )
 from parlant.api.common import (
@@ -204,6 +208,7 @@ guideline_creation_params_example: ExampleJson = {
     "action": "provide current pricing information and mention any ongoing promotions",
     "enabled": False,
     "metadata": {"key1": "value1", "key2": "value2"},
+    "composition_mode": "strict_canned",
 }
 
 
@@ -213,13 +218,15 @@ class GuidelineCreationParamsDTO(
 ):
     """Parameters for creating a new guideline."""
 
-    condition: GuidelineConditionField
     id: GuidelineIdPath | None = None
+    condition: GuidelineConditionField
     action: GuidelineActionField | None = None
     description: common.GuidelineDescriptionField | None = None
+    criticality: common.CriticalityDTO | None = None
     metadata: GuidelineMetadataField | None = None
     enabled: GuidelineEnabledField | None = None
     tags: GuidelineTagsField | None = None
+    composition_mode: CompositionModeDTO | None = None
 
 
 GuidelineMetadataUnsetField: TypeAlias = Annotated[
@@ -228,11 +235,11 @@ GuidelineMetadataUnsetField: TypeAlias = Annotated[
 ]
 
 guideline_metadata_update_params_example: ExampleJson = {
-    "add": {
+    "set": {
         "key1": "value1",
         "key2": "value2",
     },
-    "remove": ["key3", "key4"],
+    "unset": ["key3", "key4"],
 }
 
 
@@ -252,11 +259,11 @@ guideline_update_params_example: ExampleJson = {
     "enabled": True,
     "tags": ["tag1", "tag2"],
     "metadata": {
-        "add": {
+        "set": {
             "key1": "value1",
             "key2": "value2",
         },
-        "remove": ["key3", "key4"],
+        "unset": ["key3", "key4"],
     },
     "tool_associations": {
         "add": [
@@ -284,10 +291,12 @@ class GuidelineUpdateParamsDTO(
     condition: GuidelineConditionField | None = None
     action: GuidelineActionField | None = None
     description: common.GuidelineDescriptionField | None = None
+    criticality: common.CriticalityDTO | None = None
     tool_associations: GuidelineToolAssociationUpdateParamsDTO | None = None
     enabled: GuidelineEnabledField | None = None
     tags: GuidelineTagsUpdateParamsDTO | None = None
     metadata: GuidelineMetadataUpdateParamsDTO | None = None
+    composition_mode: CompositionModeDTO | None = None
 
 
 guideline_with_relationships_example: ExampleJson = {
@@ -337,6 +346,30 @@ class GuidelineWithRelationshipsAndToolAssociationsDTO(
     tool_associations: Sequence[GuidelineToolAssociationDTO]
 
 
+def _criticality_to_dto(criticality: Criticality) -> common.CriticalityDTO:
+    match criticality:
+        case Criticality.LOW:
+            return common.CriticalityDTO.LOW
+        case Criticality.MEDIUM:
+            return common.CriticalityDTO.MEDIUM
+        case Criticality.HIGH:
+            return common.CriticalityDTO.HIGH
+        case _:
+            raise ValueError(f"Invalid criticality: {criticality.value}")
+
+
+def _criticality_from_dto(dto: common.CriticalityDTO) -> Criticality:
+    match dto:
+        case common.CriticalityDTO.LOW:
+            return Criticality.LOW
+        case common.CriticalityDTO.MEDIUM:
+            return Criticality.MEDIUM
+        case common.CriticalityDTO.HIGH:
+            return Criticality.HIGH
+        case _:
+            raise ValueError(f"Invalid criticality DTO: {dto.value}")
+
+
 def _guideline_relationship_kind_to_dto(
     kind: RelationshipKind,
 ) -> RelationshipKindDTO:
@@ -376,9 +409,15 @@ def _guideline_relationship_to_dto(
             condition=rel_source_guideline.content.condition,
             action=rel_source_guideline.content.action,
             description=rel_source_guideline.content.description,
+            criticality=_criticality_to_dto(rel_source_guideline.criticality),
             enabled=rel_source_guideline.enabled,
             tags=rel_source_guideline.tags,
             metadata=rel_source_guideline.metadata,
+            composition_mode=composition_mode_to_composition_mode_dto(
+                rel_source_guideline.composition_mode
+            )
+            if rel_source_guideline.composition_mode
+            else None,
         )
         if relationship.source_type == RelationshipEntityKind.GUIDELINE
         else None,
@@ -395,9 +434,15 @@ def _guideline_relationship_to_dto(
             condition=rel_target_guideline.content.condition,
             action=rel_target_guideline.content.action,
             description=rel_target_guideline.content.description,
+            criticality=_criticality_to_dto(rel_target_guideline.criticality),
             enabled=rel_target_guideline.enabled,
             tags=rel_target_guideline.tags,
             metadata=rel_target_guideline.metadata,
+            composition_mode=composition_mode_to_composition_mode_dto(
+                rel_target_guideline.composition_mode
+            )
+            if rel_target_guideline.composition_mode
+            else None,
         )
         if relationship.target_type == RelationshipEntityKind.GUIDELINE
         else None,
@@ -454,10 +499,16 @@ def create_router(
                 condition=params.condition,
                 action=params.action or None,
                 description=params.description or None,
+                criticality=_criticality_from_dto(params.criticality)
+                if params.criticality
+                else None,
                 metadata=params.metadata or {},
                 enabled=params.enabled or True,
                 tags=params.tags,
                 id=params.id,
+                composition_mode=composition_mode_dto_to_composition_mode(params.composition_mode)
+                if params.composition_mode
+                else None,
             )
         except ValueError as e:
             raise HTTPException(
@@ -470,9 +521,13 @@ def create_router(
             condition=guideline.content.condition,
             action=guideline.content.action,
             description=guideline.content.description,
+            criticality=_criticality_to_dto(guideline.criticality),
             metadata=guideline.metadata,
             enabled=guideline.enabled,
             tags=guideline.tags,
+            composition_mode=composition_mode_to_composition_mode_dto(guideline.composition_mode)
+            if guideline.composition_mode
+            else None,
         )
 
     @router.get(
@@ -508,9 +563,15 @@ def create_router(
                 condition=guideline.content.condition,
                 action=guideline.content.action,
                 description=guideline.content.description,
+                criticality=_criticality_to_dto(guideline.criticality),
                 metadata=guideline.metadata,
                 enabled=guideline.enabled,
                 tags=guideline.tags,
+                composition_mode=composition_mode_to_composition_mode_dto(
+                    guideline.composition_mode
+                )
+                if guideline.composition_mode
+                else None,
             )
             for guideline in guidelines
         ]
@@ -563,9 +624,15 @@ def create_router(
                 condition=guideline.content.condition,
                 action=guideline.content.action,
                 description=guideline.content.description,
+                criticality=_criticality_to_dto(guideline.criticality),
                 metadata=guideline.metadata,
                 enabled=guideline.enabled,
                 tags=guideline.tags,
+                composition_mode=composition_mode_to_composition_mode_dto(
+                    guideline.composition_mode
+                )
+                if guideline.composition_mode
+                else None,
             ),
             relationships=[
                 _guideline_relationship_to_dto(relationship, indirect)
@@ -626,6 +693,7 @@ def create_router(
             condition=params.condition,
             action=params.action,
             description=params.description,
+            criticality=_criticality_from_dto(params.criticality) if params.criticality else None,
             tool_associations=GuidelineToolAssociationUpdateParams(
                 add=[
                     ToolId(service_name=t.service_name, tool_name=t.tool_name)
@@ -655,6 +723,9 @@ def create_router(
             )
             if params.metadata
             else None,
+            composition_mode=composition_mode_dto_to_composition_mode(params.composition_mode)
+            if params.composition_mode
+            else None,
         )
 
         guideline_tool_associations = await app.guidelines.find_tool_associations(guideline_id)
@@ -665,9 +736,15 @@ def create_router(
                 condition=updated_guideline.content.condition,
                 action=updated_guideline.content.action,
                 description=updated_guideline.content.description,
+                criticality=_criticality_to_dto(updated_guideline.criticality),
                 metadata=updated_guideline.metadata,
                 enabled=updated_guideline.enabled,
                 tags=updated_guideline.tags,
+                composition_mode=composition_mode_to_composition_mode_dto(
+                    updated_guideline.composition_mode
+                )
+                if updated_guideline.composition_mode
+                else None,
             ),
             relationships=[
                 _guideline_relationship_to_dto(relationship, indirect)
